@@ -1213,6 +1213,7 @@ body::before {
   <div class="card-title">📤 Export Report</div>
   <div class="export-row">
     <button class="btn btn-primary" onclick="exportPDF()">📄 Receipt PDF</button>
+    <span id="cc-pdf-badge" hidden style="font-size:11px;background:var(--green-dim);color:var(--green);border:1px solid var(--green);border-radius:5px;padding:3px 8px;font-weight:600">💳 CC Statement included</span>
     <button class="btn btn-secondary" onclick="exportExcel()">📊 Excel Report</button>
     <button class="btn btn-green" onclick="toggleEmailCompose()">✉️ Email Package</button>
   </div>
@@ -2318,7 +2319,8 @@ async function handleBatch(input) {
 // Stores parsed CC lines and pending matches between OCR runs
 let ccMatches   = []; // [{ccLine, receipt, confirmed}]
 let ccUnmatched = []; // [{ccLine}]
-let ccAllLines  = []; // all parsed CC lines (for debug)
+let ccAllLines  = []; // all parsed CC lines
+let ccStatementImageData = null;  // base64 data URL of uploaded CC statement (for debug)
 
 async function handleCCStatement(input) {
   const file = input.files[0];
@@ -2339,6 +2341,9 @@ async function handleCCStatement(input) {
 
   try {
     const dataUrl = await fileToDataUrl(file);
+    ccStatementImageData = dataUrl;  // store for PDF inclusion
+    const ccBadge = document.getElementById('cc-pdf-badge');
+    if (ccBadge) ccBadge.hidden = false;
     msgEl.textContent = 'Sending to Google Cloud Vision…';
     progressEl.style.width = '45%';
 
@@ -2846,7 +2851,7 @@ function parseReceiptText(text) {
       fn: m => {
         const mo = {Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',
                     Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};
-        return `${m[3]}-${mo[m[2].slice(0,3)]}‐${m[1].padStart(2,'0')}`;
+        return `${m[3]}-${mo[m[2].slice(0,3)]}-${m[1].padStart(2,'0')}`;
       }
     },
     { re: /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\s.]+(\d{1,2})[,\s]+(\d{4})\b/i,
@@ -2909,21 +2914,34 @@ function parseReceiptText(text) {
 
   // ── Smarter amount extraction ───────────────────────────────
   // Strategy:
-  //   1. Look for explicit "Total" / "Total Due" / "Amount Due" label → highest priority
-  //   2. Look for explicit currency code on a line → note the currency
-  //   3. Skip lines that are clearly tax breakdown / tip / change lines
-  //   4. Among remaining amounts, take the largest
-  const taxSkipRe = /\b(tax included|gst included|tip|gratuity|change|tendered|cash|cheque|check|surcharge|service charge|\d+%\s*tax)\b/i;
-  const totalLabelRe = /\b(total due|total amount|amount due|balance due|grand total|subtotal|\btotal\b)\b/i;
+  //   1. Explicit "Total Due / Grand Total / Amount Due" OR standalone "Total" → highest priority
+  //   2. Skip tax-breakdown lines (10% Tax Included, GST) and card-payment lines (Visa, Mastercard)
+  //   3. Among remaining amounts, take the largest
+  //
+  // AU receipt example:
+  //   Total              $7.00
+  //   10% Tax Included, $0.64   <- SKIP (tax line)
+  //   Visa 1175 (Contactless)   <- SKIP (card line)
+
+  const taxSkipRe = /\b(tax included|gst included|tip|gratuity|change|tendered|cash|cheque|check|surcharge|service charge|\d+%\s*tax|\d+%\s*gst|\bgst\b)\b/i;
+  const cardLineRe = /\b(visa|mastercard|amex|eftpos|credit card|debit card|contactless)\b/i;
   const amtRe = /(AUD|USD|GBP|EUR|JPY|CAD|NZD|SGD|HKD|CHF|SEK|NOK|DKK|MXN|BRL|AED|INR|THB|KRW|ZAR|CNY)?\s*[A$\xA3\u20AC\xA5\u20B9\u0E3F\u20A9]?\s*(\d{1,6}[.,]\d{2})/gi;
 
   let biggestAmt = 0;
-  let totalAmt = null;   // from a "Total" label — highest priority
+  let totalAmt = null;
   let detectedCurrency = null;
 
-  // Pass 1: scan all lines for currency codes and amounts (skip tax-breakdown lines)
+  function extractFirstVal(str) {
+    const m = str.match(/(\d{1,6}[.,]\d{2})/);
+    if (!m) return null;
+    const v = parseFloat(m[1].replace(',','.'));
+    return (!isNaN(v) && v > 0 && v < 50000) ? v : null;
+  }
+
+  // Pass 1: scan non-tax, non-card lines for amounts and currency codes
   for (const line of lines) {
-    if (taxSkipRe.test(line)) continue;  // skip tip/tax-breakdown lines
+    if (taxSkipRe.test(line)) continue;
+    if (cardLineRe.test(line)) continue;
     const re2 = new RegExp(amtRe.source, 'gi');
     let match;
     while ((match = re2.exec(line)) !== null) {
@@ -2931,28 +2949,35 @@ function parseReceiptText(text) {
       const val = parseFloat(match[2].replace(',','.'));
       if (!isNaN(val) && val < 50000) {
         if (val > biggestAmt) { biggestAmt = val; }
-        if (code && code !== 'USD') detectedCurrency = code;  // bare $ → skip; explicit AUD/GBP/etc → keep
+        if (code && code !== 'USD') detectedCurrency = code;
       }
     }
   }
 
-  // Pass 2: look for explicit Total label (highest priority) — covers "Total\n$124.50" layouts
+  // Pass 2: find explicit Total label → highest priority
+  // "Total Due", "Grand Total", "Amount Due", "Balance Due", plain "Total"
+  // but NOT "Subtotal", "Total Tax", "Total GST"
+  const grandTotalRe = /\b(total due|total amount|amount due|balance due|grand total)\b/i;
+  const plainTotalRe = /^\s*total\b/i;
+  const notTotalRe   = /\b(sub\s*total|total\s*tax|total\s*gst|tax\s*total|gst\s*total)\b/i;
+
   for (let i = 0; i < lines.length; i++) {
-    if (totalLabelRe.test(lines[i]) && !/subtotal/i.test(lines[i])) {
-      // Look at this line and next 2 lines for an amount
-      const combined = lines.slice(i, i + 3).join(' ');
-      const m = combined.match(/(\d{1,6}[.,]\d{2})/);
-      if (m) {
-        const val = parseFloat(m[1].replace(',','.'));
-        if (!isNaN(val) && val < 50000 && val > 0) {
-          totalAmt = val;
-          break;  // first "Total" wins
-        }
-      }
+    const line = lines[i];
+    const isMatch = grandTotalRe.test(line) || plainTotalRe.test(line);
+    if (!isMatch) continue;
+    if (notTotalRe.test(line)) continue;
+    // Try same line, then up to 2 lines ahead (stop at tax/card lines)
+    for (let j = i; j <= Math.min(i + 2, lines.length - 1); j++) {
+      const checkLine = lines[j];
+      if (j > i && (taxSkipRe.test(checkLine) || cardLineRe.test(checkLine))) break;
+      const v = extractFirstVal(checkLine);
+      if (v !== null) { totalAmt = v; break; }
     }
+    if (totalAmt !== null) break;
   }
 
   amount = totalAmt !== null ? totalAmt : biggestAmt;
+
   if (detectedCurrency) currency = detectedCurrency;
 
   // ── Vendor extraction — use first meaningful non-numeric line ─
@@ -3370,10 +3395,14 @@ function renderList() {
     return;
   }
 
-  // Sort: needs-review first, then by saved date descending
+  // Sort: needs-review first, then by receipt DATE descending (newest first), tiebreak by upload time
   const sorted = [...receipts].sort((a,b) => {
     if (a.needsReview && !b.needsReview) return -1;
     if (!a.needsReview && b.needsReview) return 1;
+    // Sort by receipt date descending
+    const ad = (a.date||'') + 'T' + (a.time||'00:00');
+    const bd = (b.date||'') + 'T' + (b.time||'00:00');
+    if (ad && bd && ad !== bd) return bd.localeCompare(ad);
     return (b.saved||0) - (a.saved||0);
   });
 
@@ -3536,6 +3565,40 @@ async function exportPDF() {
   doc.setTextColor(150,150,150);
   doc.setFont('helvetica','normal');
   doc.text(`Generated ${new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'})}`, MARGIN, 126);
+
+  // ── CC Statement page (if uploaded) ──────────────────────────
+  if (ccStatementImageData) {
+    doc.addPage();
+    // Header bar
+    doc.setFillColor(...navy);
+    doc.rect(0, 0, PW, 10, 'F');
+    doc.setTextColor(255,255,255);
+    doc.setFont('helvetica','bold');
+    doc.setFontSize(7);
+    doc.text('Credit Card Statement', MARGIN, 6.5);
+    doc.text(rep, PW-MARGIN, 6.5, {align:'right'});
+
+    // Label
+    doc.setTextColor(...navy);
+    doc.setFont('helvetica','bold');
+    doc.setFontSize(10);
+    doc.text('Credit Card Statement — USD Charges', MARGIN, 20);
+    doc.setFont('helvetica','normal');
+    doc.setFontSize(8);
+    doc.setTextColor(100,100,100);
+    doc.text('Statement uploaded by rep to verify USD amounts charged.', MARGIN, 27);
+
+    // Statement image
+    try {
+      const imgMaxW = PW - 2*MARGIN;
+      const imgMaxH = PH - 38 - MARGIN;
+      doc.addImage(ccStatementImageData, 'JPEG', MARGIN, 32, imgMaxW, imgMaxH, undefined, 'FAST');
+    } catch(e) {
+      doc.setFontSize(9);
+      doc.setTextColor(180,0,0);
+      doc.text('(Statement image could not be embedded)', MARGIN, 50);
+    }
+  }
 
   // Receipt pages — 4 per page (2×2)
   const COLS = 2, ROWS = 2;
