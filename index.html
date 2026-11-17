@@ -2831,12 +2831,20 @@ function parseReceiptText(text) {
   const datePatterns = [
     // ISO: 2026-10-25
     { re: /\b(\d{4})-(\d{2})-(\d{2})\b/, fn: m => `${m[1]}-${m[2]}-${m[3]}` },
-    // AU/UK: 25/10/2026 or 25-10-2026
+    // AU/UK: 25/10/2026 or 25-10-2026 (4-digit year)
     { re: /\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})\b/, fn: m => {
       // If first number > 12 it's DD/MM/YYYY; otherwise ambiguous — treat as DD/MM for non-US
       const d1=parseInt(m[1]), d2=parseInt(m[2]);
       return d1>12 ? `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`
                    : `${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
+    }},
+    // AU short: 28.10.26 or 28/10/26 (DD.MM.YY or DD/MM/YY with 2-digit year)
+    { re: /\b(\d{1,2})[\.\/](\d{1,2})[\.\/](\d{2})\b/, fn: m => {
+      const yr = '20'+m[3];
+      const d1=parseInt(m[1]), d2=parseInt(m[2]);
+      // d1>12 → definitely DD.MM, else treat as DD.MM for AU context
+      return d1>12 ? `${yr}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`
+                   : `${yr}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
     }},
     // US: 10/25/2026
     { re: /\b(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/, fn: m => {
@@ -2923,7 +2931,7 @@ function parseReceiptText(text) {
   //   10% Tax Included, $0.64   <- SKIP (tax line)
   //   Visa 1175 (Contactless)   <- SKIP (card line)
 
-  const taxSkipRe = /\b(tax included|gst included|tip|gratuity|change|tendered|cash|cheque|check|surcharge|service charge|\d+%\s*tax|\d+%\s*gst|\bgst\b)\b/i;
+  const taxSkipRe = /\b(tax included|gst included|tip|gratuity|change|tendered|cash|cheque|check|service charge|\d+%\s*tax|\d+%\s*gst|\bgst\b)\b/i;
   const cardLineRe = /\b(visa|mastercard|amex|eftpos|credit card|debit card|contactless)\b/i;
   const amtRe = /(AUD|USD|GBP|EUR|JPY|CAD|NZD|SGD|HKD|CHF|SEK|NOK|DKK|MXN|BRL|AED|INR|THB|KRW|ZAR|CNY)?\s*[A$\xA3\u20AC\xA5\u20B9\u0E3F\u20A9]?\s*(\d{1,6}[.,]\d{2})/gi;
 
@@ -2932,16 +2940,20 @@ function parseReceiptText(text) {
   let detectedCurrency = null;
 
   function extractFirstVal(str) {
-    const m = str.match(/(\d{1,6}[.,]\d{2})/);
+    // Strip date-like patterns first (DD.MM.YY, DD.MM.YYYY, DD/MM/YY) so they don't get parsed as amounts
+    const cleaned = str.replace(/\b\d{1,2}[.\/]\d{1,2}[.\/]\d{2,4}\b/g, ' ');
+    const m = cleaned.match(/(\d{1,6}[.,]\d{2})/);
     if (!m) return null;
     const v = parseFloat(m[1].replace(',','.'));
     return (!isNaN(v) && v > 0 && v < 50000) ? v : null;
   }
 
   // Pass 1: scan non-tax, non-card lines for amounts and currency codes
-  for (const line of lines) {
-    if (taxSkipRe.test(line)) continue;
-    if (cardLineRe.test(line)) continue;
+  for (const rawLine of lines) {
+    if (taxSkipRe.test(rawLine)) continue;
+    if (cardLineRe.test(rawLine)) continue;
+    // Strip date-like patterns so e.g. "28.10.26" doesn't become amount 28.10
+    const line = rawLine.replace(/\b\d{1,2}[.\/]\d{1,2}[.\/]\d{2,4}\b/g, ' ');
     const re2 = new RegExp(amtRe.source, 'gi');
     let match;
     while ((match = re2.exec(line)) !== null) {
@@ -2957,24 +2969,31 @@ function parseReceiptText(text) {
   // Pass 2: find explicit Total label → highest priority
   // "Total Due", "Grand Total", "Amount Due", "Balance Due", plain "Total"
   // but NOT "Subtotal", "Total Tax", "Total GST"
-  const grandTotalRe = /\b(total due|total amount|amount due|balance due|grand total)\b/i;
-  const plainTotalRe = /^\s*total\b/i;
-  const notTotalRe   = /\b(sub\s*total|total\s*tax|total\s*gst|tax\s*total|gst\s*total)\b/i;
+  const grandTotalRe = /\b(total due|total amount|amount due|balance due|grand total|total incl|total inc\b|total including|total payable|net total)\b/i;
+  const plainTotalRe = /^\s*(\d+\s+)?total\b/i;
+  const notTotalRe   = /\b(sub\s*total|total\s*tax|total\s*gst|tax\s*total|gst\s*total|total\s*without|total\s*before|total\s*discount|total\s*ex\b|total\s*excl)\b/i;
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const isMatch = grandTotalRe.test(line) || plainTotalRe.test(line);
-    if (!isMatch) continue;
-    if (notTotalRe.test(line)) continue;
-    // Try same line, then up to 2 lines ahead (stop at tax/card lines)
-    for (let j = i; j <= Math.min(i + 2, lines.length - 1); j++) {
-      const checkLine = lines[j];
-      if (j > i && (taxSkipRe.test(checkLine) || cardLineRe.test(checkLine))) break;
-      const v = extractFirstVal(checkLine);
-      if (v !== null) { totalAmt = v; break; }
+  // First pass: look for grand/explicit total labels (highest priority)
+  // Second pass: fall through to plain "Total"
+  // We run grand total scan first, then plain total if nothing found
+  const scanForTotal = (useGrand) => {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const isMatch = useGrand ? grandTotalRe.test(line) : (plainTotalRe.test(line) && !grandTotalRe.test(line));
+      if (!isMatch) continue;
+      if (notTotalRe.test(line)) continue;
+      for (let j = i; j <= Math.min(i + 2, lines.length - 1); j++) {
+        const checkLine = lines[j];
+        if (j > i && (taxSkipRe.test(checkLine) || cardLineRe.test(checkLine))) break;
+        const v = extractFirstVal(checkLine);
+        if (v !== null) return v;
+      }
     }
-    if (totalAmt !== null) break;
-  }
+    return null;
+  };
+
+  totalAmt = scanForTotal(true);
+  if (totalAmt === null) totalAmt = scanForTotal(false);
 
   amount = totalAmt !== null ? totalAmt : biggestAmt;
 
@@ -2993,9 +3012,11 @@ function parseReceiptText(text) {
   // ── Category heuristic ───────────────────────────────────────
   const textLower = text.toLowerCase();
   let category = 'meals';
+  // Check for food signals — if strong food signals present, stay as meals even if hotel appears
+  const hasFoodSignals = /\b(meal|menu|food|eat|dine|dining|restaurant|cafe|coffee|breakfast|lunch|dinner|burger|pizza|ramen|sushi|kebab|salad|sandwich|bowl|drink|beer|wine|cocktail)\b/i.test(text);
   if (/\buber\b|\blyft\b|\btaxi\b|\btrain\b|\bflight\b|\bairline\b|\bairport\b|\bbooking\b|\bairbnb\b|\bhotel\b|\blodg/i.test(text)) {
     if (/\buber\b|\blyft\b|\btaxi\b|\btrain\b|\bflight\b|\bairline\b/i.test(text)) category = 'travel';
-    else if (/\bhotel\b|\blodg|\bairbnb\b|\binn\b|\bmotel\b/i.test(text)) category = 'lodging';
+    else if (!hasFoodSignals && /\bhotel\b|\blodg|\bairbnb\b|\binn\b|\bmotel\b/i.test(text)) category = 'lodging';
   }
 
   return { vendor, date, time, currency, amount: amount || '', category, _rawText: text };
