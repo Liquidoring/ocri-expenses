@@ -17,6 +17,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 <style>
 /* ── OCRI DESIGN TOKENS ──────────────────────────────────────── */
 :root {
@@ -4063,39 +4064,6 @@ function exportOCRIForm() {
     doc.text('$1 :', ML+475+72, r3y);
     hline(ML+475+72+16, ML+475+72+16+40, r3y+1);
 
-    // ════ Fillable AcroForm fields over header underlines ════
-    // jsPDF AcroForm: addField(type, name, pageNum, [x,y,w,h], options)
-    // y-axis in AcroForm is from bottom of page (PDF coords)
-    // Page number is 1-based; pageIdx is 0-based
-    const pNum = pageIdx + 1;
-    const fieldH = 10;
-    const ff = (name, fx, fy, fw, val='') => {
-      // Convert from top-origin pt to PDF bottom-origin pt
-      const pdfY = PH - fy - fieldH;
-      try {
-        doc.addField('Text', name + '_p' + pNum, pNum, [fx, pdfY, fw, fieldH], {
-          value: val,
-          fontSize: 8,
-          borderColor: 'transparent',
-          backgroundColor: 'transparent',
-          color: '#000000',
-          borderWidth: 0,
-        });
-      } catch(e) { /* jsPDF AcroForm not available; skip silently */ }
-    };
-    // Row 2 fields (y baseline = y_start + 9 ≈ r2y; field top ≈ r2y - 8)
-    const r2top = y + 9 - 9;  // top of field row 2
-    ff('EmployeeName', ML+2+56,     r2top, 100, rep);
-    ff('TripLocation', ML+170+48,   r2top, 100, dest);
-    ff('DateFrom',     ML+380+22,   r2top, 65,  s ? fmtDate(s) : '');
-    ff('DateTo',       ML+475+14,   r2top, 65,  e ? fmtDate(e) : '');
-    // Row 3 fields
-    const r3top = y + hdrH + 9 - 9;
-    ff('DateSubmitted', ML+2+60,     r3top, 60, today);
-    ff('TripPurpose',   ML+170+58,   r3top, 90, purp);
-    ff('ForeignCurr',   ML+380+64,   r3top, 40, primaryCurrency);
-    ff('ExchangeRate',  ML+475+72+16,r3top, 40, '');
-
     // ════ Column headers ════
     y += hdrH * 2 + 2;
     const colHdrH = 28;
@@ -4274,9 +4242,6 @@ function exportOCRIForm() {
     hline(ML+55, ML+mileW-10, y+21);
     doc.text('Mileage Total: $', ML+4, y+28);
     hline(ML+65, ML+mileW-10, y+29);
-    // Mileage fillable fields
-    ff('BusinessMiles',  ML+55,  y+12, ML+mileW-10-(ML+55), '');
-    ff('MileageTotal',   ML+65,  y+20, ML+mileW-10-(ML+65), '');
 
     // ════ Signature lines ════
     const sigX = ML + mileW + 20;
@@ -4290,24 +4255,104 @@ function exportOCRIForm() {
 
     doc.text('Approved by Compliance Office Manager or designee:', sigX, y+25);
     hline(sigX+180, sigX+sigW, y+26);
-    // Signature fillable fields
-    ff('SigDate',       sigX+22,     y+2,  48, '');
-    ff('EmpSignature',  sigX+90+68,  y+2,  sigX+sigW-(sigX+90+68), '');
-    ff('ApproverSig',   sigX+180,    y+16, sigX+sigW-(sigX+180), '');
 
     // ════ Page number ════
     setFont('normal', 6.5);
     doc.setTextColor(100,100,100);
     textC(`Page ${pageIdx+1} of ${tabs.length}`, ML, TW, PH - 8);
+
+    // Return the mileage box top Y so pdf-lib can place fields exactly
+    return y; // y = top of mileage box after last adjustment
   }
 
-  // ── Render all pages ────────────────────────────────────────────
+  // ── Render all pages — capture mileage Y from last page ─────────
+  let lastPageMileY = 395; // fallback
   tabs.forEach((pageReceipts, idx) => {
-    drawPage(pageReceipts, idx, idx === tabs.length - 1);
+    const result = drawPage(pageReceipts, idx, idx === tabs.length - 1);
+    if (idx === tabs.length - 1 && result !== undefined) lastPageMileY = result;
   });
 
   const fname = `${(dest||'Expenses').replace(/\s+/g,'_')}_OCRI_Expense_Report.pdf`;
-  doc.save(fname);
+
+  // ── Inject real AcroForm fillable fields via pdf-lib ────────────
+  // pdf-lib coordinates: origin at BOTTOM-LEFT of page, y increases upward
+  // jsPDF top-down y → pdf-lib y = PH - jsPDF_y - fieldH
+  if (window.PDFLib) {
+    const { PDFDocument, rgb, StandardFonts } = window.PDFLib;
+    // Get raw PDF bytes from jsPDF (no save to disk yet)
+    const jsPdfBytes = doc.output('arraybuffer');
+
+    PDFDocument.load(jsPdfBytes).then(async pdfDoc => {
+      const form  = pdfDoc.getForm();
+      const pages = pdfDoc.getPages();
+      const fH    = 10;  // field height in pt
+
+      // Helper: add a text field on a given page (0-indexed)
+      // x, y are jsPDF top-down coordinates; w is width
+      const addTF = (name, pageNum, x, jy, w, val = '') => {
+        const page = pages[pageNum];
+        // Convert jsPDF top-down y to PDF bottom-up y
+        const pdfY = PH - jy - fH;
+        let field;
+        try { field = form.getTextField(name); }
+        catch(e) { field = form.createTextField(name); }
+        field.addToPage(page, {
+          x, y: pdfY, width: w, height: fH,
+          borderWidth: 0,
+          backgroundColor: undefined,  // transparent
+        });
+        field.setFontSize(8);
+        if (val) field.setText(String(val));
+      };
+
+      // ── Header fields — same coords used when drawing text/underlines ──
+      // hdrStartY = MT + 20  (after title bar)
+      const hdrStartY = MT + 20;
+      const hdrH      = 24;
+
+      // Row 2 (y baseline = hdrStartY + 9; field top = baseline - 8)
+      const r2y = hdrStartY + 9 - 8;
+      const r3y = hdrStartY + hdrH + 9 - 8;
+
+      tabs.forEach((_, pi) => {
+        addTF('EmployeeName'  + (pi>0?'_p'+(pi+1):''), pi, ML+2+56,      r2y, 100,  rep);
+        addTF('TripLocation'  + (pi>0?'_p'+(pi+1):''), pi, ML+170+48,    r2y, 100,  dest);
+        addTF('DateFrom'      + (pi>0?'_p'+(pi+1):''), pi, ML+380+22,    r2y, 65,   s ? fmtDate(s) : '');
+        addTF('DateTo'        + (pi>0?'_p'+(pi+1):''), pi, ML+475+14,    r2y, 65,   e ? fmtDate(e) : '');
+        addTF('DateSubmitted' + (pi>0?'_p'+(pi+1):''), pi, ML+2+60,      r3y, 60,   today);
+        addTF('TripPurpose'   + (pi>0?'_p'+(pi+1):''), pi, ML+170+58,    r3y, 90,   purp);
+        addTF('ForeignCurr'   + (pi>0?'_p'+(pi+1):''), pi, ML+380+64,    r3y, 40,   primaryCurrency);
+        addTF('ExchangeRate'  + (pi>0?'_p'+(pi+1):''), pi, ML+475+72+16, r3y, 40,   '');
+      });
+
+      // ── Last page only: mileage & signature fields ──────────────────
+      // lastPageMileY = exact top of mileage rect returned from drawPage()
+      const lastPi   = tabs.length - 1;
+      const mileW    = 220;
+      const myY      = lastPageMileY;  // exact y from drawPage return value
+      addTF('BusinessMiles', lastPi, ML+55,      myY+11, mileW-65,  '');
+      addTF('MileageTotal',  lastPi, ML+65,      myY+20, mileW-75,  '');
+
+      const sigX = ML + mileW + 20;
+      addTF('SigDate',      lastPi, sigX+22,       myY+1,  48,  '');
+      addTF('EmpSignature', lastPi, sigX+90+68,    myY+1,  sigX+TW-(sigX+90+68)-ML, '');
+      addTF('ApproverSig',  lastPi, sigX+180,      myY+16, sigX+TW-(sigX+180)-ML,   '');
+
+      // Save and trigger download
+      const pdfBytes = await pdfDoc.save();
+      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url; a.download = fname; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }).catch(err => {
+      console.warn('pdf-lib post-processing failed, saving without fillable fields:', err);
+      doc.save(fname);
+    });
+  } else {
+    // pdf-lib not loaded — fall back to static PDF
+    doc.save(fname);
+  }
 }
 
 // ── EMAIL ─────────────────────────────────────────────────────────
