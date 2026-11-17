@@ -1215,6 +1215,7 @@ body::before {
     <button class="btn btn-primary" onclick="exportPDF()">📄 Receipt PDF</button>
     <span id="cc-pdf-badge" hidden style="font-size:11px;background:var(--green-dim);color:var(--green);border:1px solid var(--green);border-radius:5px;padding:3px 8px;font-weight:600">💳 CC Statement included</span>
     <button class="btn btn-secondary" onclick="exportExcel()">📊 Excel Report</button>
+    <button class="btn btn-secondary" onclick="exportOCRIForm()" style="background:#374a82;border-color:#374a82;color:#fff">📋 OCRI Form PDF</button>
     <button class="btn btn-green" onclick="toggleEmailCompose()">✉️ Email Package</button>
   </div>
   <div class="email-composer" id="email-composer">
@@ -1230,7 +1231,7 @@ body::before {
     <div style="margin-bottom:8px">
       <label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px;">INSTRUCTIONS</label>
       <div class="notice notice-amber">
-        📎 <span>Download the <strong>PDF</strong> and <strong>Excel</strong> files first (buttons above), then attach them to the email that opens. No credentials are stored — your Outlook opens directly.</span>
+        📎 <span>Download the <strong>OCRI Form PDF</strong> and/or <strong>Receipt PDF</strong> and <strong>Excel</strong> files first (buttons above), then attach them to the email that opens. No credentials are stored — your Outlook opens directly.</span>
       </div>
     </div>
     <button class="btn btn-green" style="width:100%" onclick="openEmail()">✉️ Open in Outlook / Mail</button>
@@ -3905,6 +3906,368 @@ function exportExcel() {
   XLSX.writeFile(wb, fname);
 }
 
+// ── OCRI FORM PDF ─────────────────────────────────────────────────
+// Generates a PDF matching the official "Oil Center Research Int'l
+// Business Expense Report 2026" form layout exactly.
+function exportOCRIForm() {
+  if (receipts.length === 0) { alert('No receipts to export.'); return; }
+
+  const { jsPDF } = window.jspdf;
+  const rep    = document.getElementById('rep-name').value    || '';
+  const dest   = document.getElementById('trip-dest').value   || '';
+  const purp   = document.getElementById('trip-purpose').value|| '';
+  const s      = document.getElementById('trip-start').value;
+  const e      = document.getElementById('trip-end').value;
+  const today  = new Date().toLocaleDateString('en-US');
+
+  // Gather foreign currency info
+  const allForeignTotals = {};
+  receipts.forEach(r => {
+    if (r.foreignAmt && r.currency) {
+      allForeignTotals[r.currency] = (allForeignTotals[r.currency]||0) + r.foreignAmt;
+    }
+  });
+  const primaryCurrency = Object.keys(allForeignTotals)[0] || '';
+
+  const ROWS_PER_PAGE = 22;
+  const tabs = [];
+  for (let i = 0; i < receipts.length; i += ROWS_PER_PAGE) {
+    tabs.push(receipts.slice(i, i + ROWS_PER_PAGE));
+  }
+
+  // ── jsPDF setup: Letter landscape ──────────────────────────────
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' });
+  // Letter landscape: 792 × 612 pt
+  const PW = 792, PH = 612;
+  const ML = 18, MR = 18, MT = 12;
+
+  // ── Color palette ───────────────────────────────────────────────
+  const NAVY   = [55,  74, 130]; // #374a82
+  const WHITE  = [255,255,255];
+  const LGRAY  = [220,220,220];
+  const MGRAY  = [150,150,150];
+  const BLACK  = [0,  0,  0];
+  const AMBER  = [255,200, 70];
+
+  // ── Layout constants ────────────────────────────────────────────
+  const TW = PW - ML - MR;         // total usable width  = 756 pt
+  // Column X positions (pt from left margin):
+  // A(Date), B(Travel), C(Meals), D(Lodge), E(Misc), F-M(Description), N(USD), O(Foreign), P(CoCrdt), Q(NoRcpt)
+  const cols = {
+    A: { x: ML,       w: 55  },
+    B: { x: ML+55,    w: 42  },
+    C: { x: ML+97,    w: 42  },
+    D: { x: ML+139,   w: 42  },
+    E: { x: ML+181,   w: 32  },
+    F: { x: ML+213,   w: 318 }, // description spans F-M
+    N: { x: ML+531,   w: 60  },
+    O: { x: ML+591,   w: 65  },
+    P: { x: ML+656,   w: 55  },
+    Q: { x: ML+711,   w: 27  },
+  };
+  // Verify total aligns: 711+27 = 738 — leaves 18pt right margin ✓
+
+  // ── Helpers ─────────────────────────────────────────────────────
+  const setFill = (r,g,b) => { doc.setFillColor(r,g,b); };
+  const setStroke = (r,g,b,lw=0.5) => { doc.setDrawColor(r,g,b); doc.setLineWidth(lw); };
+  const setFont = (style='normal', sz=7) => {
+    doc.setFont('helvetica', style);
+    doc.setFontSize(sz);
+  };
+  const textC = (text, x, w, y, opts={}) => {
+    // center text in a column
+    doc.text(String(text||''), x + w/2, y, {align:'center', ...opts});
+  };
+  const textL = (text, x, y, maxW) => {
+    doc.text(String(text||''), x+2, y, maxW ? {maxWidth: maxW-4} : {});
+  };
+  const textR = (text, x, w, y) => {
+    doc.text(String(text||''), x+w-2, y, {align:'right'});
+  };
+  const hline = (x1, x2, y) => { doc.line(x1, y, x2, y); };
+  const vline = (x, y1, y2) => { doc.line(x, y1, x, y2); };
+  const rect  = (x, y, w, h, style='S') => { doc.rect(x, y, w, h, style); };
+
+  // ── Draw one page ────────────────────────────────────────────────
+  function drawPage(pageReceipts, pageIdx, isLastPage) {
+    if (pageIdx > 0) doc.addPage();
+    doc.setTextColor(...BLACK);
+
+    // ════ ROW 1: Title bar ════
+    let y = MT;
+    setFill(...NAVY);
+    doc.rect(ML, y, TW, 20, 'F');
+    setFont('bold', 11);
+    doc.setTextColor(...WHITE);
+    textC("Oil Center Research Int'l  Business Expense Report 2026", ML, TW, y + 13.5);
+    doc.setTextColor(...BLACK);
+
+    // ════ ROWS 2–3: Header fields ════
+    y += 20;
+    const hdrH = 24;
+    setStroke(...LGRAY, 0.4);
+    // Draw outer border for header
+    setFill(248,250,255);
+    doc.rect(ML, y, TW, hdrH*2, 'FD');
+
+    setFont('bold', 7);
+    // Row 2 labels+values
+    const r2y = y + 9;
+    // Employee Name
+    doc.text('Employee Name:', ML+2, r2y);
+    setFont('normal', 8);
+    doc.text(rep, ML+2+56, r2y);
+    hline(ML+2+56, ML+2+56+100, r2y+1);
+
+    setFont('bold', 7);
+    doc.text('Trip Location:', ML+170, r2y);
+    setFont('normal', 8);
+    doc.text(dest, ML+170+48, r2y);
+    hline(ML+170+48, ML+170+48+100, r2y+1);
+
+    setFont('bold', 7);
+    doc.text('From:', ML+380, r2y);
+    setFont('normal', 8);
+    doc.text(s ? fmtDate(s) : '', ML+380+22, r2y);
+    hline(ML+380+22, ML+380+22+65, r2y+1);
+
+    setFont('bold', 7);
+    doc.text('To:', ML+475, r2y);
+    setFont('normal', 8);
+    doc.text(e ? fmtDate(e) : '', ML+475+14, r2y);
+    hline(ML+475+14, ML+475+14+65, r2y+1);
+
+    // Row 3 labels+values
+    const r3y = y + hdrH + 9;
+    setFont('bold', 7);
+    doc.text('Date Submitted:', ML+2, r3y);
+    setFont('normal', 8);
+    doc.text(today, ML+2+60, r3y);
+    hline(ML+2+60, ML+2+60+60, r3y+1);
+
+    setFont('bold', 7);
+    doc.text('Purpose of Trip:', ML+170, r3y);
+    setFont('normal', 8);
+    doc.text(purp, ML+170+58, r3y);
+    hline(ML+170+58, ML+170+58+90, r3y+1);
+
+    setFont('bold', 7);
+    doc.text('Foreign Currency:', ML+380, r3y);
+    setFont('normal', 8);
+    doc.text(primaryCurrency, ML+380+64, r3y);
+    hline(ML+380+64, ML+380+64+40, r3y+1);
+
+    setFont('bold', 7);
+    doc.text('US $ Exchange Rate:', ML+475, r3y);
+    setFont('normal', 8);
+    doc.text('$1 :', ML+475+72, r3y);
+    hline(ML+475+72+16, ML+475+72+16+40, r3y+1);
+
+    // ════ Column headers ════
+    y += hdrH * 2 + 2;
+    const colHdrH = 28;
+    setFill(...NAVY);
+    doc.rect(ML, y, TW, colHdrH, 'F');
+    doc.setTextColor(...WHITE);
+    setFont('bold', 6.5);
+
+    // Header row
+    const chy = y + colHdrH/2;
+    textC('Date',              cols.A.x, cols.A.w, chy - 3);
+    textC('Travel',            cols.B.x, cols.B.w, chy - 5);
+    textC('Expense',           cols.B.x, cols.B.w, chy + 1);
+    textC('& Tips *',          cols.B.x, cols.B.w, chy + 7);
+    textC('Meals',             cols.C.x, cols.C.w, chy - 3);
+    textC('& Tips',            cols.C.x, cols.C.w, chy + 4);
+    textC('Lodging',           cols.D.x, cols.D.w, chy - 3);
+    textC('& Tips',            cols.D.x, cols.D.w, chy + 4);
+    textC('Misc.',             cols.E.x, cols.E.w, chy);
+    // Description header (long)
+    setFont('bold', 6.5);
+    textC('Description of Other Fully Deductible Expenses', cols.F.x, cols.F.w, chy - 5);
+    textC('Include company name listed on the itemized receipt', cols.F.x, cols.F.w, chy + 2);
+    // Amount header
+    textC('Amount of Fully', cols.N.x, cols.N.w + cols.O.w, chy - 5);
+    textC('Deductible Expenses', cols.N.x, cols.N.w + cols.O.w, chy + 2);
+
+    textC('Co. Crdt', cols.P.x, cols.P.w, chy - 3);
+    textC('Card',     cols.P.x, cols.P.w, chy + 4);
+    textC('No',       cols.Q.x, cols.Q.w, chy - 3);
+    textC('Rcpt',     cols.Q.x, cols.Q.w, chy + 4);
+
+    // Sub-header: USD / Foreign Currency
+    y += colHdrH;
+    const subHdrH = 11;
+    setFill(68, 89, 143); // slightly lighter navy
+    doc.rect(cols.N.x, y, cols.N.w + cols.O.w, subHdrH, 'F');
+    doc.setTextColor(...WHITE);
+    setFont('bold', 6.5);
+    textC('USD', cols.N.x, cols.N.w, y + 7.5);
+    textC('Foreign Currency', cols.O.x, cols.O.w, y + 7.5);
+
+    // ════ Data rows 1–22 ════
+    y += subHdrH;
+    const ROW_H = 14;
+    doc.setTextColor(...BLACK);
+
+    // Draw vertical column dividers for data section
+    const dataBottom = y + ROW_H * ROWS_PER_PAGE;
+    setStroke(...LGRAY, 0.3);
+    [cols.A, cols.B, cols.C, cols.D, cols.E, cols.F, cols.N, cols.O, cols.P, cols.Q].forEach(col => {
+      vline(col.x, y, dataBottom);
+    });
+    vline(cols.Q.x + cols.Q.w, y, dataBottom); // right border
+
+    for (let ri = 0; ri < ROWS_PER_PAGE; ri++) {
+      const ry = y + ri * ROW_H;
+      const r  = pageReceipts[ri];
+
+      // Alternating row background
+      if (ri % 2 === 0) {
+        setFill(248, 249, 252);
+        doc.rect(ML, ry, TW, ROW_H, 'F');
+      }
+
+      // Horizontal line
+      setStroke(...LGRAY, 0.2);
+      hline(ML, ML + TW, ry + ROW_H);
+
+      if (!r) continue;
+
+      setFont('normal', 7);
+      const ty = ry + ROW_H - 4;
+
+      // Date
+      if (r.date) textC(fmtDate(r.date), cols.A.x, cols.A.w, ty);
+
+      // Amount in correct category column
+      const usd = r.usdAmt || null;
+      if (usd) {
+        const fmtAmt = `$${usd.toFixed(2)}`;
+        if (r.category === 'travel')  textR(fmtAmt, cols.B.x, cols.B.w, ty);
+        else if (r.category === 'meals')   textR(fmtAmt, cols.C.x, cols.C.w, ty);
+        else if (r.category === 'lodging') textR(fmtAmt, cols.D.x, cols.D.w, ty);
+        else                               textR(fmtAmt, cols.E.x, cols.E.w, ty);
+      }
+
+      // Description
+      const desc = (r.vendor||'') + (r.description && r.description !== '[Batch — review & add USD amount]' ? ` — ${r.description}` : '');
+      if (desc) textL(desc, cols.F.x, ty, cols.F.w);
+
+      // USD total
+      if (usd) textR(`$${usd.toFixed(2)}`, cols.N.x, cols.N.w, ty);
+
+      // Foreign
+      if (r.foreignAmt) {
+        const sym = CURRENCY_SYMBOLS[r.currency]||'';
+        textR(`${sym}${r.foreignAmt.toFixed(2)}`, cols.O.x, cols.O.w, ty);
+      }
+    }
+
+    // ════ Totals row ════
+    y = dataBottom;
+    const totH = 16;
+    setFill(230, 235, 248);
+    doc.rect(ML, y, TW, totH, 'F');
+    setStroke(...NAVY, 0.4);
+    hline(ML, ML+TW, y);
+    hline(ML, ML+TW, y+totH);
+    [cols.A, cols.B, cols.C, cols.D, cols.E, cols.F, cols.N, cols.O, cols.P, cols.Q].forEach(col => {
+      vline(col.x, y, y+totH);
+    });
+    vline(cols.Q.x + cols.Q.w, y, y+totH);
+
+    setFont('bold', 7.5);
+    doc.setTextColor(...NAVY);
+    const ty2 = y + totH - 4;
+    doc.text('Totals', cols.A.x + 2, ty2);
+
+    // Calculate totals
+    let tTravel=0, tMeals=0, tLodge=0, tMisc=0, tForeign=0;
+    pageReceipts.forEach(r => {
+      if (!r) return;
+      const usd = r.usdAmt || 0;
+      if (r.category==='travel')  tTravel  += usd;
+      else if (r.category==='meals')   tMeals   += usd;
+      else if (r.category==='lodging') tLodge   += usd;
+      else                             tMisc    += usd;
+      if (r.foreignAmt) tForeign += r.foreignAmt;
+    });
+    const tTotal = tTravel + tMeals + tLodge + tMisc;
+
+    setFont('bold', 7.5);
+    if (tTravel>0) textR(`$${tTravel.toFixed(2)}`,  cols.B.x, cols.B.w, ty2);
+    if (tMeals>0)  textR(`$${tMeals.toFixed(2)}`,   cols.C.x, cols.C.w, ty2);
+    if (tLodge>0)  textR(`$${tLodge.toFixed(2)}`,   cols.D.x, cols.D.w, ty2);
+    if (tMisc>0)   textR(`$${tMisc.toFixed(2)}`,    cols.E.x, cols.E.w, ty2);
+    doc.text('Subtotal of Page', cols.F.x + 2, ty2);
+    textR(`$${tTotal.toFixed(2)}`, cols.N.x, cols.N.w, ty2);
+    if (tForeign>0) {
+      const sym = CURRENCY_SYMBOLS[primaryCurrency]||'';
+      textR(`${sym}${tForeign.toFixed(2)}`, cols.O.x, cols.O.w, ty2);
+    }
+
+    // ════ Footer info ════
+    y += totH + 2;
+    setFont('normal', 6);
+    doc.setTextColor(80,80,80);
+    doc.text('* Travel Expenses include items such as taxi, tolls, car rental, parking, etc.', ML+2, y+8);
+    doc.text('Itemized receipts must be attached for all items listed.', ML+300, y+8);
+
+    // Total of Page / Grand Total
+    setFont('bold', 7.5);
+    doc.setTextColor(...NAVY);
+    doc.text('Total of Page:', ML+TW-cols.P.w-cols.Q.w-cols.O.w-cols.N.w-10, y+8);
+    textR(`$${tTotal.toFixed(2)}`, cols.N.x, cols.N.w, y+8);
+
+    if (isLastPage) {
+      const grandTotal = receipts.reduce((sum,r) => sum + (r.usdAmt||0), 0);
+      doc.text('Grand Total (If last page):', ML+TW-cols.P.w-cols.Q.w-cols.O.w-cols.N.w-10, y+16);
+      textR(`$${grandTotal.toFixed(2)}`, cols.N.x, cols.N.w, y+16);
+    }
+
+    // ════ Mileage section ════
+    y += isLastPage ? 26 : 18;
+    setStroke(...LGRAY, 0.4);
+    const mileW = 220;
+    doc.rect(ML, y, mileW, 30, 'S');
+    setFont('bold', 7);
+    doc.setTextColor(...BLACK);
+    doc.text('Business Mileage @ $0.725 per mile', ML+4, y+10);
+    setFont('normal', 7);
+    doc.text('Business Miles:', ML+4, y+20);
+    hline(ML+55, ML+mileW-10, y+21);
+    doc.text('Mileage Total: $', ML+4, y+28);
+    hline(ML+65, ML+mileW-10, y+29);
+
+    // ════ Signature lines ════
+    const sigX = ML + mileW + 20;
+    const sigW = TW - mileW - 20;
+    setFont('bold', 7);
+    doc.setTextColor(...BLACK);
+    doc.text('Date:', sigX, y+10);
+    hline(sigX+22, sigX+70, y+11);
+    doc.text('Employee Signature:', sigX+90, y+10);
+    hline(sigX+90+68, sigX+sigW, y+11);
+
+    doc.text('Approved by Compliance Office Manager or designee:', sigX, y+25);
+    hline(sigX+180, sigX+sigW, y+26);
+
+    // ════ Page number ════
+    setFont('normal', 6.5);
+    doc.setTextColor(100,100,100);
+    textC(`Page ${pageIdx+1} of ${tabs.length}`, ML, TW, PH - 8);
+  }
+
+  // ── Render all pages ────────────────────────────────────────────
+  tabs.forEach((pageReceipts, idx) => {
+    drawPage(pageReceipts, idx, idx === tabs.length - 1);
+  });
+
+  const fname = `${(dest||'Expenses').replace(/\s+/g,'_')}_OCRI_Expense_Report.pdf`;
+  doc.save(fname);
+}
+
 // ── EMAIL ─────────────────────────────────────────────────────────
 function toggleEmailCompose() {
   const ec = document.getElementById('email-composer');
@@ -3943,8 +4306,9 @@ function openEmail() {
     pending > 0 ? `Pending USD:  ${pending} items — CC statement not yet received` : ``,
     ``,
     `Attachments:`,
+    `  • ${dest.replace(/\s+/g,'_')}_OCRI_Expense_Report.pdf — official OCRI expense form`,
     `  • ${dest.replace(/\s+/g,'_')}_Receipts.pdf — receipt photo booklet`,
-    `  • ${dest.replace(/\s+/g,'_')}_Expense_Report.xlsx — itemized expense report`,
+    `  • ${dest.replace(/\s+/g,'_')}_Expense_Report.xlsx — itemized expense report (with formulas)`,
     ``,
     `Please review and process at your earliest convenience.`,
     ``,
@@ -3976,6 +4340,16 @@ function clearAll() {
     : 'Clear all receipts and trip data?';
   if (!confirm(msg)) return;
   receipts = [];
+  // Clear CC statement state
+  ccMatches = [];
+  ccStatementImageData = null;
+  document.getElementById('cc-pdf-badge').hidden = true;
+  document.getElementById('cc-matches').hidden = true;
+  document.getElementById('cc-match-list').innerHTML = '';
+  document.getElementById('cc-import-card').style.borderColor = '';
+  // Remove any "Applied" notice appended to cc-import-card
+  const ccAppliedNotice = document.getElementById('cc-import-card').querySelector('.notice-green');
+  if (ccAppliedNotice) ccAppliedNotice.remove();
   ['trip-dest','trip-start','trip-end','trip-purpose','manager-email'].forEach(id => {
     document.getElementById(id).value = '';
   });
