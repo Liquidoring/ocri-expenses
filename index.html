@@ -4108,6 +4108,7 @@ function exportOCRIForm() {
 
     // ════ Data rows 1–22 ════
     y += subHdrH;
+    const dataStartY = y;  // capture for pdf-lib field placement
     const ROW_H = 14;
     doc.setTextColor(...BLACK);
 
@@ -4261,15 +4262,21 @@ function exportOCRIForm() {
     doc.setTextColor(100,100,100);
     textC(`Page ${pageIdx+1} of ${tabs.length}`, ML, TW, PH - 8);
 
-    // Return the mileage box top Y so pdf-lib can place fields exactly
-    return y; // y = top of mileage box after last adjustment
+    // Return layout anchors so pdf-lib can place fields exactly
+    return { mileY: y, dataStartY };
   }
 
-  // ── Render all pages — capture mileage Y from last page ─────────
-  let lastPageMileY = 395; // fallback
+  // ── Render all pages — capture layout anchors ────────────────────
+  let lastPageMileY = 395;   // fallback
+  const pageDataStartYs = [];
   tabs.forEach((pageReceipts, idx) => {
     const result = drawPage(pageReceipts, idx, idx === tabs.length - 1);
-    if (idx === tabs.length - 1 && result !== undefined) lastPageMileY = result;
+    if (result) {
+      pageDataStartYs.push(result.dataStartY);
+      if (idx === tabs.length - 1) lastPageMileY = result.mileY;
+    } else {
+      pageDataStartYs.push(null);
+    }
   });
 
   const fname = `${(dest||'Expenses').replace(/\s+/g,'_')}_OCRI_Expense_Report.pdf`;
@@ -4314,29 +4321,58 @@ function exportOCRIForm() {
       const r2y = hdrStartY + 9 - 8;
       const r3y = hdrStartY + hdrH + 9 - 8;
 
-      tabs.forEach((_, pi) => {
-        addTF('EmployeeName'  + (pi>0?'_p'+(pi+1):''), pi, ML+2+56,      r2y, 100,  rep);
-        addTF('TripLocation'  + (pi>0?'_p'+(pi+1):''), pi, ML+170+48,    r2y, 100,  dest);
-        addTF('DateFrom'      + (pi>0?'_p'+(pi+1):''), pi, ML+380+22,    r2y, 65,   s ? fmtDate(s) : '');
-        addTF('DateTo'        + (pi>0?'_p'+(pi+1):''), pi, ML+475+14,    r2y, 65,   e ? fmtDate(e) : '');
-        addTF('DateSubmitted' + (pi>0?'_p'+(pi+1):''), pi, ML+2+60,      r3y, 60,   today);
-        addTF('TripPurpose'   + (pi>0?'_p'+(pi+1):''), pi, ML+170+58,    r3y, 90,   purp);
-        addTF('ForeignCurr'   + (pi>0?'_p'+(pi+1):''), pi, ML+380+64,    r3y, 40,   primaryCurrency);
-        addTF('ExchangeRate'  + (pi>0?'_p'+(pi+1):''), pi, ML+475+72+16, r3y, 40,   '');
+      tabs.forEach((pageRecs, pi) => {
+        const sfx = pi > 0 ? '_p' + (pi+1) : '';
+        // Header fields
+        addTF('EmployeeName'  + sfx, pi, ML+2+56,      r2y, 100,  rep);
+        addTF('TripLocation'  + sfx, pi, ML+170+48,    r2y, 100,  dest);
+        addTF('DateFrom'      + sfx, pi, ML+380+22,    r2y, 65,   s ? fmtDate(s) : '');
+        addTF('DateTo'        + sfx, pi, ML+475+14,    r2y, 65,   e ? fmtDate(e) : '');
+        addTF('DateSubmitted' + sfx, pi, ML+2+60,      r3y, 60,   today);
+        addTF('TripPurpose'   + sfx, pi, ML+170+58,    r3y, 90,   purp);
+        addTF('ForeignCurr'   + sfx, pi, ML+380+64,    r3y, 40,   primaryCurrency);
+        addTF('ExchangeRate'  + sfx, pi, ML+475+72+16, r3y, 40,   '');
+
+        // ── Data rows — one field per cell per row ──────────────────
+        const dsY  = pageDataStartYs[pi];
+        const rowH = 14;
+        if (dsY != null) {
+          for (let ri = 0; ri < ROWS_PER_PAGE; ri++) {
+            const ry  = dsY + ri * rowH;   // top of this row (jsPDF coords)
+            const r   = pageRecs[ri];
+            const rsf = `_p${pi+1}_r${ri+1}`;
+            const usd   = r ? (r.usdAmt   || 0) : 0;
+            const cat   = r ? (r.category || '') : '';
+            const desc  = r ? ((r.vendor||'') + (r.description && r.description !== '[Batch — review & add USD amount]' ? ` — ${r.description}` : '')) : '';
+            const fAmt  = r ? (r.foreignAmt || 0) : 0;
+
+            addTF('Date'    + rsf, pi, cols.A.x+1,  ry+1, cols.A.w-2, r && r.date ? fmtDate(r.date) : '');
+            addTF('Travel'  + rsf, pi, cols.B.x+1,  ry+1, cols.B.w-2, cat==='travel'  && usd ? `$${usd.toFixed(2)}` : '');
+            addTF('Meals'   + rsf, pi, cols.C.x+1,  ry+1, cols.C.w-2, cat==='meals'   && usd ? `$${usd.toFixed(2)}` : '');
+            addTF('Lodging' + rsf, pi, cols.D.x+1,  ry+1, cols.D.w-2, cat==='lodging' && usd ? `$${usd.toFixed(2)}` : '');
+            addTF('Misc'    + rsf, pi, cols.E.x+1,  ry+1, cols.E.w-2, (cat!=='travel'&&cat!=='meals'&&cat!=='lodging') && usd ? `$${usd.toFixed(2)}` : '');
+            addTF('Desc'    + rsf, pi, cols.F.x+2,  ry+1, cols.F.w-4, desc);
+            addTF('USD'     + rsf, pi, cols.N.x+1,  ry+1, cols.N.w-2, usd ? `$${usd.toFixed(2)}` : '');
+            addTF('Foreign' + rsf, pi, cols.O.x+1,  ry+1, cols.O.w-2, fAmt ? `${CURRENCY_SYMBOLS[r.currency]||''}${fAmt.toFixed(2)}` : '');
+            addTF('CoCrdt'  + rsf, pi, cols.P.x+1,  ry+1, cols.P.w-2, '');
+            addTF('NoRcpt'  + rsf, pi, cols.Q.x+1,  ry+1, cols.Q.w-2, '');
+          }
+        }
       });
 
       // ── Last page only: mileage & signature fields ──────────────────
-      // lastPageMileY = exact top of mileage rect returned from drawPage()
       const lastPi   = tabs.length - 1;
       const mileW    = 220;
-      const myY      = lastPageMileY;  // exact y from drawPage return value
-      addTF('BusinessMiles', lastPi, ML+55,      myY+11, mileW-65,  '');
-      addTF('MileageTotal',  lastPi, ML+65,      myY+20, mileW-75,  '');
+      const myY      = lastPageMileY;
+      const pageRightEdge = ML + TW;   // = 756 pt — never exceed this
+      addTF('BusinessMiles', lastPi, ML+55,  myY+11, mileW-65, '');
+      addTF('MileageTotal',  lastPi, ML+65,  myY+20, mileW-75, '');
 
-      const sigX = ML + mileW + 20;
-      addTF('SigDate',      lastPi, sigX+22,       myY+1,  48,  '');
-      addTF('EmpSignature', lastPi, sigX+90+68,    myY+1,  sigX+TW-(sigX+90+68)-ML, '');
-      addTF('ApproverSig',  lastPi, sigX+180,      myY+16, sigX+TW-(sigX+180)-ML,   '');
+      const sigX    = ML + mileW + 20;   // = 258 pt
+      const sigEnd  = pageRightEdge - 4; // = 752 pt — 4 pt margin from right edge
+      addTF('SigDate',      lastPi, sigX+22,       myY+1,  48,                        '');
+      addTF('EmpSignature', lastPi, sigX+90+68,    myY+1,  sigEnd-(sigX+90+68),       '');
+      addTF('ApproverSig',  lastPi, sigX+180,      myY+16, sigEnd-(sigX+180),         '');
 
       // Save and trigger download
       const pdfBytes = await pdfDoc.save();
