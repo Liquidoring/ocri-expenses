@@ -2838,6 +2838,13 @@ function parseReceiptText(text) {
       return d1>12 ? `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`
                    : `${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
     }},
+    // AU/UK partial year: 30/10/202 (OCR cut last digit) → treat as 2026
+    { re: /\b(\d{1,2})[\/\.](\d{1,2})\/20(2\d?)(?!\d)/, fn: m => {
+      const yr = '20' + (m[3].length===1 ? m[3]+'6' : m[3]);
+      const d1=parseInt(m[1]);
+      return d1>12 ? `${yr}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`
+                   : `${yr}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
+    }},
     // AU short: 28.10.26 or 28/10/26 (DD.MM.YY or DD/MM/YY with 2-digit year)
     { re: /\b(\d{1,2})[\.\/](\d{1,2})[\.\/](\d{2})\b/, fn: m => {
       const yr = '20'+m[3];
@@ -2854,7 +2861,16 @@ function parseReceiptText(text) {
         ? `${yr}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`
         : `${yr}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
     }},
-    // "25 Oct 2026" or "Oct 25, 2026"
+    // "25 Oct 2026", "26 Oct'26", or "Oct 25, 2026"
+    { re: /\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\s,']+(?:20)?(\d{2,4})\b/i,
+      fn: m => {
+        const mo = {Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',
+                    Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};
+        const yr = m[3].length===2 ? '20'+m[3] : m[3];
+        return `${yr}-${mo[m[2].slice(0,3)]}-${m[1].padStart(2,'0')}`;
+      }
+    },
+    // DEAD PLACEHOLDER — replaced above
     { re: /\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\s,]+(\d{4})\b/i,
       fn: m => {
         const mo = {Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',
@@ -2931,8 +2947,8 @@ function parseReceiptText(text) {
   //   10% Tax Included, $0.64   <- SKIP (tax line)
   //   Visa 1175 (Contactless)   <- SKIP (card line)
 
-  const taxSkipRe = /\b(tax included|gst included|tip|gratuity|change|tendered|cash|cheque|check|service charge|\d+%\s*tax|\d+%\s*gst|\bgst\b)\b/i;
-  const cardLineRe = /\b(visa|mastercard|amex|eftpos|credit card|debit card|contactless)\b/i;
+  const taxSkipRe = /\b(tax included|gst included|tip|gratuity|change|tendered|cash|cheque|check|service charge|\d+%\s*tax|\d+%\s*gst|\bgst\b|you saved|specials|discount)\b/i;
+  const cardLineRe = /\b(visa|mastercard|amex|eftpos|credit card|debit card|contactless|lightspeed|eft\b|credit\s*card|payment method|card surcharge)\b/i;
   const amtRe = /(AUD|USD|GBP|EUR|JPY|CAD|NZD|SGD|HKD|CHF|SEK|NOK|DKK|MXN|BRL|AED|INR|THB|KRW|ZAR|CNY)?\s*[A$\xA3\u20AC\xA5\u20B9\u0E3F\u20A9]?\s*(\d{1,6}[.,]\d{2})/gi;
 
   let biggestAmt = 0;
@@ -2940,6 +2956,8 @@ function parseReceiptText(text) {
   let detectedCurrency = null;
 
   function extractFirstVal(str) {
+    // Skip lines with a negative/discount amount (e.g. -2.80)
+    if (/(?:^|\s)-\s*\d/.test(str)) return null;
     // Strip date-like patterns first (DD.MM.YY, DD.MM.YYYY, DD/MM/YY) so they don't get parsed as amounts
     const cleaned = str.replace(/\b\d{1,2}[.\/]\d{1,2}[.\/]\d{2,4}\b/g, ' ');
     const m = cleaned.match(/(\d{1,6}[.,]\d{2})/);
