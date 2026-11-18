@@ -4134,36 +4134,8 @@ function exportOCRIForm() {
       setStroke(...LGRAY, 0.2);
       hline(ML, ML + TW, ry + ROW_H);
 
-      if (!r) continue;
-
-      setFont('normal', 7);
-      const ty = ry + ROW_H - 4;
-
-      // Date
-      if (r.date) textC(fmtDate(r.date), cols.A.x, cols.A.w, ty);
-
-      // Amount in correct category column
-      const usd = r.usdAmt || null;
-      if (usd) {
-        const fmtAmt = `$${usd.toFixed(2)}`;
-        if (r.category === 'travel')  textR(fmtAmt, cols.B.x, cols.B.w, ty);
-        else if (r.category === 'meals')   textR(fmtAmt, cols.C.x, cols.C.w, ty);
-        else if (r.category === 'lodging') textR(fmtAmt, cols.D.x, cols.D.w, ty);
-        else                               textR(fmtAmt, cols.E.x, cols.E.w, ty);
-      }
-
-      // Description
-      const desc = (r.vendor||'') + (r.description && r.description !== '[Batch — review & add USD amount]' ? ` — ${r.description}` : '');
-      if (desc) textL(desc, cols.F.x, ty, cols.F.w);
-
-      // USD total
-      if (usd) textR(`$${usd.toFixed(2)}`, cols.N.x, cols.N.w, ty);
-
-      // Foreign
-      if (r.foreignAmt) {
-        const sym = CURRENCY_SYMBOLS[r.currency]||'';
-        textR(`${sym}${r.foreignAmt.toFixed(2)}`, cols.O.x, cols.O.w, ty);
-      }
+      // Data rows: NO static text drawn here — all values live in pdf-lib fields
+      // (drawing static text AND a field on top causes the ghosting seen in v41)
     }
 
     // ════ Totals row ════
@@ -4184,30 +4156,24 @@ function exportOCRIForm() {
     const ty2 = y + totH - 4;
     doc.text('Totals', cols.A.x + 2, ty2);
 
-    // Calculate totals
+    // Compute totals for initial field values (no static text drawn — fields handle display)
     let tTravel=0, tMeals=0, tLodge=0, tMisc=0, tForeign=0;
     pageReceipts.forEach(r => {
       if (!r) return;
       const usd = r.usdAmt || 0;
-      if (r.category==='travel')  tTravel  += usd;
-      else if (r.category==='meals')   tMeals   += usd;
-      else if (r.category==='lodging') tLodge   += usd;
-      else                             tMisc    += usd;
+      if (r.category==='travel')       tTravel += usd;
+      else if (r.category==='meals')   tMeals  += usd;
+      else if (r.category==='lodging') tLodge  += usd;
+      else                             tMisc   += usd;
       if (r.foreignAmt) tForeign += r.foreignAmt;
     });
     const tTotal = tTravel + tMeals + tLodge + tMisc;
+    // Store for pdf-lib field pre-fill (accessed via closure in forEach below)
+    // tTravel, tMeals, tLodge, tMisc, tTotal, tForeign available to tabs.forEach
 
     setFont('bold', 7.5);
-    if (tTravel>0) textR(`$${tTravel.toFixed(2)}`,  cols.B.x, cols.B.w, ty2);
-    if (tMeals>0)  textR(`$${tMeals.toFixed(2)}`,   cols.C.x, cols.C.w, ty2);
-    if (tLodge>0)  textR(`$${tLodge.toFixed(2)}`,   cols.D.x, cols.D.w, ty2);
-    if (tMisc>0)   textR(`$${tMisc.toFixed(2)}`,    cols.E.x, cols.E.w, ty2);
     doc.text('Subtotal of Page', cols.F.x + 2, ty2);
-    textR(`$${tTotal.toFixed(2)}`, cols.N.x, cols.N.w, ty2);
-    if (tForeign>0) {
-      const sym = CURRENCY_SYMBOLS[primaryCurrency]||'';
-      textR(`${sym}${tForeign.toFixed(2)}`, cols.O.x, cols.O.w, ty2);
-    }
+    // Dollar amounts are NOT drawn here — they live in pdf-lib fields to avoid ghosting
 
     // ════ Footer info ════
     y += totH + 2;
@@ -4216,18 +4182,14 @@ function exportOCRIForm() {
     doc.text('* Travel Expenses include items such as taxi, tolls, car rental, parking, etc.', ML+2, y+8);
     doc.text('Itemized receipts must be attached for all items listed.', ML+300, y+8);
 
-    // Total of Page / Grand Total
-    // Label is right-aligned inside the description column; amount is in col N
+    // Total of Page / Grand Total labels only — amounts are pdf-lib fields
     setFont('bold', 7.5);
     doc.setTextColor(...NAVY);
-    const labelRightEdge = cols.N.x - 4;          // 4 pt gap before col N
+    const labelRightEdge = cols.N.x - 4;
     textR('Total of Page:', cols.F.x, labelRightEdge - cols.F.x, y+8);
-    textR(`$${tTotal.toFixed(2)}`, cols.N.x, cols.N.w, y+8);
 
     if (isLastPage) {
-      const grandTotal = receipts.reduce((sum,r) => sum + (r.usdAmt||0), 0);
       textR('Grand Total (If last page):', cols.F.x, labelRightEdge - cols.F.x, y+16);
-      textR(`$${grandTotal.toFixed(2)}`, cols.N.x, cols.N.w, y+16);
     }
 
     // ════ Mileage section ════
@@ -4293,12 +4255,17 @@ function exportOCRIForm() {
       const form  = pdfDoc.getForm();
       const pages = pdfDoc.getPages();
       const fH    = 10;  // field height in pt
+      const { rgb } = window.PDFLib;
+      const WHITE_BG = rgb(1, 1, 1);
+      const TRANS_BG = undefined; // transparent
 
       // Helper: add a text field on a given page (0-indexed)
-      // x, y are jsPDF top-down coordinates; w is width
-      const addTF = (name, pageNum, x, jy, w, val = '') => {
+      // x, jy are jsPDF top-down coordinates; w is width
+      // opts.bg = true  → white background (hides static text underneath)
+      // opts.bold = true → bold font
+      // opts.calc = JS string → field calculate action
+      const addTF = (name, pageNum, x, jy, w, val = '', opts = {}) => {
         const page = pages[pageNum];
-        // Convert jsPDF top-down y to PDF bottom-up y
         const pdfY = PH - jy - fH;
         let field;
         try { field = form.getTextField(name); }
@@ -4306,10 +4273,27 @@ function exportOCRIForm() {
         field.addToPage(page, {
           x, y: pdfY, width: w, height: fH,
           borderWidth: 0,
-          backgroundColor: undefined,  // transparent
+          backgroundColor: opts.bg ? WHITE_BG : TRANS_BG,
         });
-        field.setFontSize(8);
-        if (val) field.setText(String(val));
+        field.setFontSize(opts.fontSize || 8);
+        if (val !== undefined && val !== '') field.setText(String(val));
+        // Attach JS calculate action if provided
+        if (opts.calc) {
+          const acroField = field.acroField;
+          if (acroField && acroField.dict) {
+            const { PDFName, PDFDict, PDFString } = window.PDFLib;
+            try {
+              const jsAction = pdfDoc.context.obj({
+                Type: 'Action',
+                S: 'JavaScript',
+                JS: PDFString.of(opts.calc),
+              });
+              acroField.dict.set(PDFName.of('AA'), pdfDoc.context.obj({
+                C: jsAction,
+              }));
+            } catch(e) { /* JS actions not supported in this pdf-lib build */ }
+          }
+        }
       };
 
       // ── Header fields — same coords used when drawing text/underlines ──
@@ -4336,26 +4320,86 @@ function exportOCRIForm() {
         // ── Data rows — one field per cell per row ──────────────────
         const dsY  = pageDataStartYs[pi];
         const rowH = 14;
+        const n    = ROWS_PER_PAGE;
         if (dsY != null) {
-          for (let ri = 0; ri < ROWS_PER_PAGE; ri++) {
-            const ry  = dsY + ri * rowH;   // top of this row (jsPDF coords)
+          // Build JS calc strings for the Totals row (sum of each column across rows)
+          // Field names: Travel_p2_r1 ... Travel_p2_r22  (p1 uses no _p suffix for first page)
+          const colCalc = (prefix) => {
+            const names = [];
+            for (let ri = 1; ri <= n; ri++) names.push(`${prefix}_p${pi+1}_r${ri}`);
+            // JS: sum numeric portions, format as $X.XX
+            return `var t=0; [${names.map(nm=>`"${nm}"`).join(',')}].forEach(function(nm){` +
+              `var f=this.getField(nm); if(f){var v=f.value.replace(/[^0-9.]/g,""); if(v)t+=parseFloat(v)||0;}` +
+              `},this); event.value=t>0?"$"+t.toFixed(2):"";`;
+          };
+
+          for (let ri = 0; ri < n; ri++) {
+            const ry  = dsY + ri * rowH;
             const r   = pageRecs[ri];
             const rsf = `_p${pi+1}_r${ri+1}`;
             const usd   = r ? (r.usdAmt   || 0) : 0;
             const cat   = r ? (r.category || '') : '';
             const desc  = r ? ((r.vendor||'') + (r.description && r.description !== '[Batch — review & add USD amount]' ? ` — ${r.description}` : '')) : '';
             const fAmt  = r ? (r.foreignAmt || 0) : 0;
+            const bg    = { bg: true, fontSize: 7 };
 
-            addTF('Date'    + rsf, pi, cols.A.x+1,  ry+1, cols.A.w-2, r && r.date ? fmtDate(r.date) : '');
-            addTF('Travel'  + rsf, pi, cols.B.x+1,  ry+1, cols.B.w-2, cat==='travel'  && usd ? `$${usd.toFixed(2)}` : '');
-            addTF('Meals'   + rsf, pi, cols.C.x+1,  ry+1, cols.C.w-2, cat==='meals'   && usd ? `$${usd.toFixed(2)}` : '');
-            addTF('Lodging' + rsf, pi, cols.D.x+1,  ry+1, cols.D.w-2, cat==='lodging' && usd ? `$${usd.toFixed(2)}` : '');
-            addTF('Misc'    + rsf, pi, cols.E.x+1,  ry+1, cols.E.w-2, (cat!=='travel'&&cat!=='meals'&&cat!=='lodging') && usd ? `$${usd.toFixed(2)}` : '');
-            addTF('Desc'    + rsf, pi, cols.F.x+2,  ry+1, cols.F.w-4, desc);
-            addTF('USD'     + rsf, pi, cols.N.x+1,  ry+1, cols.N.w-2, usd ? `$${usd.toFixed(2)}` : '');
-            addTF('Foreign' + rsf, pi, cols.O.x+1,  ry+1, cols.O.w-2, fAmt ? `${CURRENCY_SYMBOLS[r.currency]||''}${fAmt.toFixed(2)}` : '');
-            addTF('CoCrdt'  + rsf, pi, cols.P.x+1,  ry+1, cols.P.w-2, '');
-            addTF('NoRcpt'  + rsf, pi, cols.Q.x+1,  ry+1, cols.Q.w-2, '');
+            addTF('Date'    + rsf, pi, cols.A.x+1,  ry+1, cols.A.w-2, r && r.date ? fmtDate(r.date) : '', bg);
+            addTF('Travel'  + rsf, pi, cols.B.x+1,  ry+1, cols.B.w-2, cat==='travel'  && usd ? `$${usd.toFixed(2)}` : '', bg);
+            addTF('Meals'   + rsf, pi, cols.C.x+1,  ry+1, cols.C.w-2, cat==='meals'   && usd ? `$${usd.toFixed(2)}` : '', bg);
+            addTF('Lodging' + rsf, pi, cols.D.x+1,  ry+1, cols.D.w-2, cat==='lodging' && usd ? `$${usd.toFixed(2)}` : '', bg);
+            addTF('Misc'    + rsf, pi, cols.E.x+1,  ry+1, cols.E.w-2, (cat!=='travel'&&cat!=='meals'&&cat!=='lodging') && usd ? `$${usd.toFixed(2)}` : '', bg);
+            addTF('Desc'    + rsf, pi, cols.F.x+2,  ry+1, cols.F.w-4, desc, bg);
+            addTF('USD'     + rsf, pi, cols.N.x+1,  ry+1, cols.N.w-2, usd ? `$${usd.toFixed(2)}` : '', bg);
+            addTF('Foreign' + rsf, pi, cols.O.x+1,  ry+1, cols.O.w-2, fAmt ? `${CURRENCY_SYMBOLS[r && r.currency]||''}${fAmt.toFixed(2)}` : '', bg);
+            addTF('CoCrdt'  + rsf, pi, cols.P.x+1,  ry+1, cols.P.w-2, '', bg);
+            addTF('NoRcpt'  + rsf, pi, cols.Q.x+1,  ry+1, cols.Q.w-2, '', bg);
+          }
+
+          // ── Totals row fields (auto-calculate from data rows) ──────
+          // dataBottom = dsY + rowH * n
+          const tbY  = dsY + rowH * n;  // top of totals row (jsPDF coords)
+          const totH = 16;
+          const tbg  = { bg: true, fontSize: 8 };
+
+          // Compute initial values from receipts
+          let iTravel=0, iMeals=0, iLodge=0, iMisc=0, iTot=0, iForeign=0;
+          pageRecs.forEach(r => {
+            if (!r) return;
+            const u = r.usdAmt || 0;
+            if (r.category==='travel')       iTravel += u;
+            else if (r.category==='meals')   iMeals  += u;
+            else if (r.category==='lodging') iLodge  += u;
+            else                             iMisc   += u;
+            if (r.foreignAmt) iForeign += r.foreignAmt;
+          });
+          iTot = iTravel + iMeals + iLodge + iMisc;
+
+          addTF(`TotTravel_p${pi+1}`, pi, cols.B.x+1, tbY+3, cols.B.w-2, iTravel ? `$${iTravel.toFixed(2)}` : '', {...tbg, calc: colCalc('Travel')});
+          addTF(`TotMeals_p${pi+1}`,  pi, cols.C.x+1, tbY+3, cols.C.w-2, iMeals  ? `$${iMeals.toFixed(2)}`  : '', {...tbg, calc: colCalc('Meals')});
+          addTF(`TotLodge_p${pi+1}`,  pi, cols.D.x+1, tbY+3, cols.D.w-2, iLodge  ? `$${iLodge.toFixed(2)}`  : '', {...tbg, calc: colCalc('Lodging')});
+          addTF(`TotMisc_p${pi+1}`,   pi, cols.E.x+1, tbY+3, cols.E.w-2, iMisc   ? `$${iMisc.toFixed(2)}`   : '', {...tbg, calc: colCalc('Misc')});
+
+          // USD Subtotal = sum of USD column
+          const usdSubCalc = colCalc('USD');
+          addTF(`TotUSD_p${pi+1}`,    pi, cols.N.x+1, tbY+3, cols.N.w-2, iTot    ? `$${iTot.toFixed(2)}`    : '', {...tbg, calc: usdSubCalc});
+
+          // Foreign total (static initial, editable)
+          const sym = primaryCurrency && CURRENCY_SYMBOLS[primaryCurrency] ? CURRENCY_SYMBOLS[primaryCurrency] : (primaryCurrency||'');
+          addTF(`TotForeign_p${pi+1}`,pi, cols.O.x+1, tbY+3, cols.O.w-2, iForeign ? `${sym}${iForeign.toFixed(2)}` : '', tbg);
+
+          // ── Total of Page field (= USD subtotal for this page) ─────
+          const footY = tbY + totH + 2;  // footer row y
+          addTF(`TotPage_p${pi+1}`,   pi, cols.N.x+1, footY+1, cols.N.w-2, iTot ? `$${iTot.toFixed(2)}` : '', {...tbg, calc: usdSubCalc});
+
+          // ── Grand Total (last page only) ───────────────────────────
+          if (pi === tabs.length - 1) {
+            const grandTotal = receipts.reduce((s,r) => s + (r.usdAmt||0), 0);
+            // Grand total JS: sum all TotUSD fields across all pages
+            const gtNames = tabs.map((_,i) => `TotUSD_p${i+1}`);
+            const gtCalc = `var t=0; [${gtNames.map(n=>`"${n}"`).join(',')}].forEach(function(nm){` +
+              `var f=this.getField(nm); if(f){var v=f.value.replace(/[^0-9.]/g,""); if(v)t+=parseFloat(v)||0;}` +
+              `},this); event.value=t>0?"$"+t.toFixed(2):"";`;
+            addTF(`GrandTotal`, pi, cols.N.x+1, footY+10, cols.N.w-2, grandTotal ? `$${grandTotal.toFixed(2)}` : '', {...tbg, calc: gtCalc});
           }
         }
       });
