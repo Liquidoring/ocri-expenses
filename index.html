@@ -4005,8 +4005,9 @@ function exportExcel() {
         sc(ws,`F${rowNum}`, full, {...dataStyle(rowFill,8,'left')});
       }
 
-      // USD total col N = SUM(B:E) for this row — formula only, no cached value
-      ws[`N${rowNum}`] = { t:'n', f:`SUM(B${rowNum}:E${rowNum})`,
+      // USD total col N = sum of B:E for this row (plain value, no formula)
+      const rowTotal = (isTravel&&usd?usd:0)+(isMeals&&usd?usd:0)+(isLodging&&usd?usd:0)+(isMisc&&usd?usd:0);
+      if(rowTotal>0) ws[`N${rowNum}`] = { t:'n', v:rowTotal,
         s:{...dataStyle(rowFill,8,'right'), numFmt:USD_FMT} };
 
       // Foreign
@@ -4033,13 +4034,13 @@ function exportExcel() {
     const sumE = tabReceipts.reduce((a,r)=>a+(r.category==='misc'?(parseFloat(r.usd)||0):0),0);
     const sumN = sumB+sumC+sumD+sumE;
     const sumO = tabReceipts.reduce((a,r)=>a+(parseFloat(r.foreignAmt)||0),0);
-    ws['B31']={t:'n',f:'SUM(B9:B30)',s:{...tst,numFmt:USD_FMT}};
-    ws['C31']={t:'n',f:'SUM(C9:C30)',s:{...tst,numFmt:USD_FMT}};
-    ws['D31']={t:'n',f:'SUM(D9:D30)',s:{...tst,numFmt:USD_FMT}};
-    ws['E31']={t:'n',f:'SUM(E9:E30)',s:{...tst,numFmt:USD_FMT}};
+    ws['B31']={t:'n',v:sumB,s:{...tst,numFmt:USD_FMT}};
+    ws['C31']={t:'n',v:sumC,s:{...tst,numFmt:USD_FMT}};
+    ws['D31']={t:'n',v:sumD,s:{...tst,numFmt:USD_FMT}};
+    ws['E31']={t:'n',v:sumE,s:{...tst,numFmt:USD_FMT}};
     sc(ws,'F31','Subtotal of Page',{...tst, alignment:{horizontal:"center",vertical:"center"}});
-    ws['N31']={t:'n',f:'SUM(N9:N30)',s:{...tst,numFmt:USD_FMT}};
-    ws['O31']={t:'n',f:'SUM(O9:O30)',s:{...tst,numFmt:USD_FMT}};
+    ws['N31']={t:'n',v:sumN,s:{...tst,numFmt:USD_FMT}};
+    ws['O31']={t:'n',v:sumO,s:{...tst,numFmt:USD_FMT}};
     // Fill remaining merged cols
     for(let c=CF+1;c<=CM;c++) sc(ws,`${col(c)}31`,'',{fill:navyFill,border:allMed});
     for(let c of[CP,CQ]) sc(ws,`${col(c)}31`,'',{fill:navyFill,border:allMed});
@@ -4057,7 +4058,7 @@ function exportExcel() {
       {font:{name:"Arial",bold:true,sz:9,color:{rgb:NAVY}},
        alignment:{horizontal:"right",vertical:"center"}});
 
-    ws['N32'] = {t:'n',f:'N31',
+    ws['N32'] = {t:'n',v:sumN,
       s:{fill:lblueFill, font:{name:"Arial",bold:true,sz:10,color:{rgb:NAVY}},
          alignment:{horizontal:"right",vertical:"center"},
          border:allMed, numFmt:USD_FMT}};
