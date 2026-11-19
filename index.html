@@ -4005,9 +4005,8 @@ function exportExcel() {
         sc(ws,`F${rowNum}`, full, {...dataStyle(rowFill,8,'left')});
       }
 
-      // USD total (sum of B:E for this row)
-      const rowUsd = (usd && isTravel?usd:0)+(usd && isMeals?usd:0)+(usd && isLodging?usd:0)+(usd && isMisc?usd:0);
-      ws[`N${rowNum}`] = { t:'n', v:rowUsd,
+      // USD total col N = SUM(B:E) for this row — formula only, no cached value
+      ws[`N${rowNum}`] = { t:'n', f:`SUM(B${rowNum}:E${rowNum})`,
         s:{...dataStyle(rowFill,8,'right'), numFmt:USD_FMT} };
 
       // Foreign
@@ -4034,13 +4033,13 @@ function exportExcel() {
     const sumE = tabReceipts.reduce((a,r)=>a+(r.category==='misc'?(parseFloat(r.usd)||0):0),0);
     const sumN = sumB+sumC+sumD+sumE;
     const sumO = tabReceipts.reduce((a,r)=>a+(parseFloat(r.foreignAmt)||0),0);
-    ws['B31']={t:'n',v:sumB,s:{...tst,numFmt:USD_FMT}};
-    ws['C31']={t:'n',v:sumC,s:{...tst,numFmt:USD_FMT}};
-    ws['D31']={t:'n',v:sumD,s:{...tst,numFmt:USD_FMT}};
-    ws['E31']={t:'n',v:sumE,s:{...tst,numFmt:USD_FMT}};
+    ws['B31']={t:'n',f:'SUM(B9:B30)',s:{...tst,numFmt:USD_FMT}};
+    ws['C31']={t:'n',f:'SUM(C9:C30)',s:{...tst,numFmt:USD_FMT}};
+    ws['D31']={t:'n',f:'SUM(D9:D30)',s:{...tst,numFmt:USD_FMT}};
+    ws['E31']={t:'n',f:'SUM(E9:E30)',s:{...tst,numFmt:USD_FMT}};
     sc(ws,'F31','Subtotal of Page',{...tst, alignment:{horizontal:"center",vertical:"center"}});
-    ws['N31']={t:'n',v:sumN,s:{...tst,numFmt:USD_FMT}};
-    ws['O31']={t:'n',v:sumO,s:{...tst,numFmt:USD_FMT}};
+    ws['N31']={t:'n',f:'SUM(N9:N30)',s:{...tst,numFmt:USD_FMT}};
+    ws['O31']={t:'n',f:'SUM(O9:O30)',s:{...tst,numFmt:USD_FMT}};
     // Fill remaining merged cols
     for(let c=CF+1;c<=CM;c++) sc(ws,`${col(c)}31`,'',{fill:navyFill,border:allMed});
     for(let c of[CP,CQ]) sc(ws,`${col(c)}31`,'',{fill:navyFill,border:allMed});
@@ -4058,7 +4057,7 @@ function exportExcel() {
       {font:{name:"Arial",bold:true,sz:9,color:{rgb:NAVY}},
        alignment:{horizontal:"right",vertical:"center"}});
 
-    ws['N32'] = {t:'n',v:sumN,
+    ws['N32'] = {t:'n',f:'N31',
       s:{fill:lblueFill, font:{name:"Arial",bold:true,sz:10,color:{rgb:NAVY}},
          alignment:{horizontal:"right",vertical:"center"},
          border:allMed, numFmt:USD_FMT}};
@@ -4077,7 +4076,7 @@ function exportExcel() {
         const parts = tabs.map((_,i)=>`'OCR-Intl (${i+1})'!N32`);
         gtFormula = '=' + parts.join('+');
       }
-      ws['N33'] = {t:'n', v:grandTotal,
+      ws['N33'] = {t:'n', f:gtFormula.slice(1),
         s:{fill:navyFill, font:{name:"Arial",bold:true,sz:11,color:{rgb:WHITE}},
            alignment:{horizontal:"right",vertical:"center"},
            border:{top:{style:"thick",color:{rgb:NAVY}},bottom:{style:"thick",color:{rgb:NAVY}},
@@ -4196,16 +4195,10 @@ function exportExcel() {
   wb.Sheets['Summary'] = sumWs;
 
   const fname = `${(dest||'Expenses').replace(/\s+/g,'_')}_Expense_Report.xlsx`;
-  // Browser-safe download (xlsx-style writeFile uses Node's writeFileSync in some builds)
+  // Browser-safe download using array buffer (avoids corrupt formula cells with binary type)
   try {
-    const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'binary' });
-    function s2ab(s) {
-      const buf = new ArrayBuffer(s.length);
-      const view = new Uint8Array(buf);
-      for (let i = 0; i < s.length; i++) view[i] = s.charCodeAt(i) & 0xFF;
-      return buf;
-    }
-    const blob = new Blob([s2ab(wbout)], { type: 'application/octet-stream' });
+    const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([wbout], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
