@@ -4069,7 +4069,6 @@ function exportExcel() {
 
     if(tabIdx === tabs.length-1){
       let gtFormula;
-      const grandTotal = tabs.reduce((acc,tr)=>acc+tr.reduce((a,r)=>a+(parseFloat(r.usd)||0),0),0);
       if(tabs.length===1){
         gtFormula = '=N32';
       } else {
@@ -4195,10 +4194,13 @@ function exportExcel() {
   wb.Sheets['Summary'] = sumWs;
 
   const fname = `${(dest||'Expenses').replace(/\s+/g,'_')}_Expense_Report.xlsx`;
-  // Browser-safe download using array buffer (avoids corrupt formula cells with binary type)
+  // Browser-safe download
   try {
-    const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-    const blob = new Blob([wbout], { type: 'application/octet-stream' });
+    const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'binary' });
+    const buf = new ArrayBuffer(wbout.length);
+    const view = new Uint8Array(buf);
+    for (let i = 0; i < wbout.length; i++) view[i] = wbout.charCodeAt(i) & 0xFF;
+    const blob = new Blob([buf], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
