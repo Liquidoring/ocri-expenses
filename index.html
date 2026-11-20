@@ -3748,9 +3748,10 @@ function exportExcel() {
   const primaryCurrency = Object.keys(allForeignTotals)[0] || '';
   const grandUSD = receipts.reduce((s,r)=>s+(r.usdAmt||0),0);
 
-  const ROWS_PER_TAB = 22;
+  const ROWS_PER_TAB = 27;
+  const MAX_TABS = 4;
   const tabs = [];
-  for (let i = 0; i < receipts.length; i += ROWS_PER_TAB)
+  for (let i = 0; i < receipts.length && tabs.length < MAX_TABS; i += ROWS_PER_TAB)
     tabs.push(receipts.slice(i, i + ROWS_PER_TAB));
   if (!tabs.length) tabs.push([]);
 
@@ -3856,10 +3857,10 @@ function exportExcel() {
     ws['!rows'][5] = {hpx:40};  // row 6  col headers
     ws['!rows'][6] = {hpx:8};   // row 7  spacer
     ws['!rows'][7] = {hpx:18};  // row 8  sub-headers
-    for(let r=8;r<30;r++) ws['!rows'][r]={hpx:16}; // data rows 9-30
-    ws['!rows'][30] = {hpx:18}; // row 31 totals
-    ws['!rows'][31] = {hpx:28}; // row 32 footer
-    ws['!rows'][32] = {hpx:18}; // row 33 grand total
+    for(let r=8;r<35;r++) ws['!rows'][r]={hpx:16}; // data rows 9-35
+    ws['!rows'][35] = {hpx:18}; // row 36 totals
+    ws['!rows'][36] = {hpx:28}; // row 37 footer
+    ws['!rows'][37] = {hpx:18}; // row 38 grand total
 
     ws['!cols'] = colWidths;
 
@@ -3889,24 +3890,24 @@ function exportExcel() {
     // Row 8 sub-header (USD/Foreign merged across data cols)
     // No specific merges needed — cells B-E share the totals area
 
-    // Data rows 9-30: merge F:M for description
-    for(let ri=0;ri<22;ri++) addMerge(9+ri,CF, 9+ri,CM);
+    // Data rows 9-35: merge F:M for description (27 rows)
+    for(let ri=0;ri<27;ri++) addMerge(9+ri,CF, 9+ri,CM);
 
-    // Row 31 totals: merge F:M
-    addMerge(31,CF, 31,CM);
+    // Row 36 totals: merge F:M
+    addMerge(36,CF, 36,CM);
 
-    // Row 32 footer
-    addMerge(32,CA, 32,CF);    // A:F note
-    addMerge(32,CF+1, 32,10);  // G:J itemized note
-    addMerge(32,11, 32,CM);    // K:M "Total of Page" label
+    // Row 37 footer
+    addMerge(37,CA, 37,CF);    // A:F note
+    addMerge(37,CF+1, 37,10);  // G:J itemized note
+    addMerge(37,11, 37,CM);    // K:M "Total of Page" label
 
-    // Row 33 grand total
-    addMerge(33,11, 33,CM);    // K:M "Grand Total" label
+    // Row 38 grand total
+    addMerge(38,11, 38,CM);    // K:M "Grand Total" label
 
     // Sig rows
-    addMerge(36,CB, 36,CE);    // Date sig line
-    addMerge(36,CF, 36,CM);    // "Employee Signature:" label
-    addMerge(36,CN, 36,CQ);    // sig line
+    addMerge(41,CB, 41,CE);    // Date sig line
+    addMerge(41,CF, 41,CM);    // "Employee Signature:" label
+    addMerge(41,CN, 41,CQ);    // sig line
 
     // ── ROW 1: Title banner ──────────────────────────────────────────
     sc(ws,'A1', "Oil Center Research Int'l Business Expense Report 2026",
@@ -3964,7 +3965,7 @@ function exportExcel() {
     sc(ws,'N8', 'USD', subHdrSt);
     sc(ws,'O8', 'Foreign\nCurrency', subHdrSt);
 
-    // ── ROWS 9-30: Data rows ──────────────────────────────────────────
+    // ── ROWS 9-35: Data rows ──────────────────────────────────────────
     const USD_FMT = '#,##0.00';
     for(let ri=0;ri<ROWS_PER_TAB;ri++){
       const rowNum = 9 + ri;
@@ -4024,9 +4025,9 @@ function exportExcel() {
       }
     }
 
-    // ── ROW 31: Totals ────────────────────────────────────────────────
+    // ── ROW 36: Totals ────────────────────────────────────────────────
     const tst = totStyle();
-    sc(ws,'A31','TOTALS',{...tst, alignment:{horizontal:"center",vertical:"center"}});
+    sc(ws,'A36','TOTALS',{...tst, alignment:{horizontal:"center",vertical:"center"}});
     // Pre-compute totals so xlsx-style has cached values (v:) alongside formulas
     const sumB = tabReceipts.reduce((a,r)=>a+(r.category==='travel'?(parseFloat(r.usdAmt)||0):0),0);
     const sumC = tabReceipts.reduce((a,r)=>a+(r.category==='meals'?(parseFloat(r.usdAmt)||0):0),0);
@@ -4034,68 +4035,68 @@ function exportExcel() {
     const sumE = tabReceipts.reduce((a,r)=>a+(r.category==='misc'?(parseFloat(r.usdAmt)||0):0),0);
     const sumN = sumB+sumC+sumD+sumE;
     const sumO = tabReceipts.reduce((a,r)=>a+(parseFloat(r.foreignAmt)||0),0);
-    ws['B31']={f:'SUM(B9:B30)',v:sumB,s:{...tst,numFmt:USD_FMT}};
-    ws['C31']={f:'SUM(C9:C30)',v:sumC,s:{...tst,numFmt:USD_FMT}};
-    ws['D31']={f:'SUM(D9:D30)',v:sumD,s:{...tst,numFmt:USD_FMT}};
-    ws['E31']={f:'SUM(E9:E30)',v:sumE,s:{...tst,numFmt:USD_FMT}};
-    sc(ws,'F31','Subtotal of Page',{...tst, alignment:{horizontal:"center",vertical:"center"}});
-    ws['N31']={f:'SUM(N9:N30)',v:sumN,s:{...tst,numFmt:USD_FMT}};
-    ws['O31']={f:'SUM(O9:O30)',v:sumO,s:{...tst,numFmt:USD_FMT}};
+    ws['B36']={f:'SUM(B9:B35)',v:sumB,s:{...tst,numFmt:USD_FMT}};
+    ws['C36']={f:'SUM(C9:C35)',v:sumC,s:{...tst,numFmt:USD_FMT}};
+    ws['D36']={f:'SUM(D9:D35)',v:sumD,s:{...tst,numFmt:USD_FMT}};
+    ws['E36']={f:'SUM(E9:E35)',v:sumE,s:{...tst,numFmt:USD_FMT}};
+    sc(ws,'F36','Subtotal of Page',{...tst, alignment:{horizontal:"center",vertical:"center"}});
+    ws['N36']={f:'SUM(N9:N35)',v:sumN,s:{...tst,numFmt:USD_FMT}};
+    ws['O36']={f:'SUM(O9:O35)',v:sumO,s:{...tst,numFmt:USD_FMT}};
     // Fill remaining merged cols
-    for(let c=CF+1;c<=CM;c++) sc(ws,`${col(c)}31`,'',{fill:navyFill,border:allMed});
-    for(let c of[CP,CQ]) sc(ws,`${col(c)}31`,'',{fill:navyFill,border:allMed});
+    for(let c=CF+1;c<=CM;c++) sc(ws,`${col(c)}36`,'',{fill:navyFill,border:allMed});
+    for(let c of[CP,CQ]) sc(ws,`${col(c)}36`,'',{fill:navyFill,border:allMed});
 
-    // ── ROW 32: Footer ────────────────────────────────────────────────
+    // ── ROW 37: Footer ────────────────────────────────────────────────
     const footFont = {name:"Arial",sz:7,italic:true,color:{rgb:"444444"}};
-    sc(ws,'A32','* Travel Expenses include items such as taxi, tolls, car rental, parking, etc.',
+    sc(ws,'A37','* Travel Expenses include items such as taxi, tolls, car rental, parking, etc.',
       {font:footFont, alignment:{horizontal:"left",vertical:"center",wrapText:true}});
 
-    sc(ws,'G32','Itemized receipts must be attached for all items listed.',
+    sc(ws,'G37','Itemized receipts must be attached for all items listed.',
       {font:{name:"Arial",sz:8,bold:true,color:{rgb:NAVY}},
        alignment:{horizontal:"center",vertical:"center"}});
 
-    sc(ws,'K32','Total of Page:',
+    sc(ws,'K37','Total of Page:',
       {font:{name:"Arial",bold:true,sz:9,color:{rgb:NAVY}},
        alignment:{horizontal:"right",vertical:"center"}});
 
-    ws['N32'] = {f:'N31',v:sumN,
+    ws['N37'] = {f:'N36',v:sumN,
       s:{fill:lblueFill, font:{name:"Arial",bold:true,sz:10,color:{rgb:NAVY}},
          alignment:{horizontal:"right",vertical:"center"},
          border:allMed, numFmt:USD_FMT}};
 
-    // ── ROW 33: Grand Total ───────────────────────────────────────────
-    sc(ws,'K33','Grand Total (last page):',
+    // ── ROW 38: Grand Total (cascading across all pages) ──────────────
+    sc(ws,'K38','Grand Total (all pages):',
       {font:{name:"Arial",bold:true,sz:9,color:{rgb:NAVY}},
        alignment:{horizontal:"right",vertical:"center"}});
 
-    if(tabIdx === tabs.length-1){
-      // Grand total = sum of all tabs' USD totals
-      const grandTotal = tabs.reduce((acc,tr)=>acc+tr.reduce((a,r)=>a+(parseFloat(r.usdAmt)||0),0),0);
-      const gtFormula = tabs.length===1 ? 'N32' : tabs.map((_,i)=>`'OCR-Intl (${i+1})'!N32`).join('+');
-      ws['N33'] = {f:gtFormula, v:grandTotal,
-        s:{fill:navyFill, font:{name:"Arial",bold:true,sz:11,color:{rgb:WHITE}},
-           alignment:{horizontal:"right",vertical:"center"},
-           border:{top:{style:"thick",color:{rgb:NAVY}},bottom:{style:"thick",color:{rgb:NAVY}},
-                   left:{style:"thick",color:{rgb:NAVY}},right:{style:"thick",color:{rgb:NAVY}}},
-           numFmt:USD_FMT}};
-    }
+    // Every page shows grand total = sum of all previous pages' N36 + this page's N36
+    // This matches the 4-page template pattern exactly
+    const prevRefs = tabs.slice(0, tabIdx).map((_,i)=>`'OCR-Intl (${i+1})'!N36`);
+    const gtFormula = prevRefs.length ? prevRefs.join('+') + '+N36' : 'N36';
+    const grandTotal = tabs.slice(0, tabIdx+1).reduce((acc,tr)=>acc+tr.reduce((a,r)=>a+(parseFloat(r.usdAmt)||0),0),0);
+    ws['N38'] = {f:gtFormula, v:grandTotal,
+      s:{fill:navyFill, font:{name:"Arial",bold:true,sz:11,color:{rgb:WHITE}},
+         alignment:{horizontal:"right",vertical:"center"},
+         border:{top:{style:"thick",color:{rgb:NAVY}},bottom:{style:"thick",color:{rgb:NAVY}},
+                 left:{style:"thick",color:{rgb:NAVY}},right:{style:"thick",color:{rgb:NAVY}}},
+         numFmt:USD_FMT}};
 
-    // ── ROWS 34-36: Mileage & Signature ──────────────────────────────
-    sc(ws,'F34','Miles',{font:{name:"Arial",bold:true,sz:8,color:{rgb:NAVY}},
+    // ── ROWS 39-41: Mileage & Signature ──────────────────────────────
+    sc(ws,'F39','Miles',{font:{name:"Arial",bold:true,sz:8,color:{rgb:NAVY}},
       alignment:{horizontal:"center"}});
-    sc(ws,'H34','Business Mileage @ $0.76 per mile',
+    sc(ws,'H39','Business Mileage @ $0.76 per mile',
       {font:{name:"Arial",sz:8,color:{rgb:NAVY}}});
-    sc(ws,'F35','Business Miles',{font:{name:"Arial",sz:8}});
+    sc(ws,'F40','Business Miles',{font:{name:"Arial",sz:8}});
 
-    sc(ws,'A36','Date:',{font:{name:"Arial",bold:true,sz:9,color:{rgb:NAVY}}});
-    sc(ws,'F36','Employee Signature:',
+    sc(ws,'A41','Date:',{font:{name:"Arial",bold:true,sz:9,color:{rgb:NAVY}}});
+    sc(ws,'F41','Employee Signature:',
       {font:{name:"Arial",bold:true,sz:9,color:{rgb:NAVY}},
        alignment:{horizontal:"right"}});
-    sc(ws,'B36','',{border:{bottom:{style:"medium",color:{rgb:"000000"}}}});
-    sc(ws,'N36','',{border:{bottom:{style:"medium",color:{rgb:"000000"}}}});
+    sc(ws,'B41','',{border:{bottom:{style:"medium",color:{rgb:"000000"}}}});
+    sc(ws,'N41','',{border:{bottom:{style:"medium",color:{rgb:"000000"}}}});
 
-    addMerge(38,CA, 38,CQ);
-    sc(ws,'A38','Approved by Compliance Office Manager or designee',
+    addMerge(43,CA, 43,CQ);
+    sc(ws,'A43','Approved by Compliance Office Manager or designee',
       {font:{name:"Arial",sz:8,italic:true,color:{rgb:"666666"}},
        alignment:{horizontal:"center"}});
 
