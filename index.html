@@ -4028,10 +4028,10 @@ function exportExcel() {
     const tst = totStyle();
     sc(ws,'A31','TOTALS',{...tst, alignment:{horizontal:"center",vertical:"center"}});
     // Pre-compute totals so xlsx-style has cached values (v:) alongside formulas
-    const sumB = tabReceipts.reduce((a,r)=>a+(r.category==='travel'?(parseFloat(r.usd)||0):0),0);
-    const sumC = tabReceipts.reduce((a,r)=>a+(r.category==='meals'?(parseFloat(r.usd)||0):0),0);
-    const sumD = tabReceipts.reduce((a,r)=>a+(r.category==='lodging'?(parseFloat(r.usd)||0):0),0);
-    const sumE = tabReceipts.reduce((a,r)=>a+(r.category==='misc'?(parseFloat(r.usd)||0):0),0);
+    const sumB = tabReceipts.reduce((a,r)=>a+(r.category==='travel'?(parseFloat(r.usdAmt)||0):0),0);
+    const sumC = tabReceipts.reduce((a,r)=>a+(r.category==='meals'?(parseFloat(r.usdAmt)||0):0),0);
+    const sumD = tabReceipts.reduce((a,r)=>a+(r.category==='lodging'?(parseFloat(r.usdAmt)||0):0),0);
+    const sumE = tabReceipts.reduce((a,r)=>a+(r.category==='misc'?(parseFloat(r.usdAmt)||0):0),0);
     const sumN = sumB+sumC+sumD+sumE;
     const sumO = tabReceipts.reduce((a,r)=>a+(parseFloat(r.foreignAmt)||0),0);
     ws['B31']={f:'SUM(B9:B30)',v:sumB,s:{...tst,numFmt:USD_FMT}};
@@ -4070,7 +4070,7 @@ function exportExcel() {
 
     if(tabIdx === tabs.length-1){
       // Grand total = sum of all tabs' USD totals
-      const grandTotal = tabs.reduce((acc,tr)=>acc+tr.reduce((a,r)=>a+(parseFloat(r.usd)||0),0),0);
+      const grandTotal = tabs.reduce((acc,tr)=>acc+tr.reduce((a,r)=>a+(parseFloat(r.usdAmt)||0),0),0);
       const gtFormula = tabs.length===1 ? 'N32' : tabs.map((_,i)=>`'OCR-Intl (${i+1})'!N32`).join('+');
       ws['N33'] = {f:gtFormula, v:grandTotal,
         s:{fill:navyFill, font:{name:"Arial",bold:true,sz:11,color:{rgb:WHITE}},
