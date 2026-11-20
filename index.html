@@ -3729,7 +3729,7 @@ async function exportPDF() {
 }
 
 // ── EXCEL EXPORT (styled, using xlsx-style) ───────────────────────────────
-function exportExcel() {
+async function exportExcel() {
   if (receipts.length === 0) { alert('No receipts to export.'); return; }
 
   const rep    = document.getElementById('rep-name').value    || '';
@@ -3748,19 +3748,28 @@ function exportExcel() {
   const primaryCurrency = Object.keys(allForeignTotals)[0] || '';
   const grandUSD = receipts.reduce((s,r)=>s+(r.usdAmt||0),0);
 
+  // ── LAYOUT matching the 3-page template exactly ─────────────────────────
+  // Header row 4, data rows 5-31 (27 rows), totals row 32,
+  // footer/Total-of-Page row 33, Grand Total row 34
   const ROWS_PER_TAB = 27;
   const MAX_TABS = 4;
+  const DATA_START = 5;   // first data row
+  const DATA_END   = 31;  // last data row
+  const TOT_ROW    = 32;  // TOTALS row
+  const FOOT_ROW   = 33;  // footer / Total of Page row
+  const GT_ROW     = 34;  // Grand Total row
+
   const tabs = [];
   for (let i = 0; i < receipts.length && tabs.length < MAX_TABS; i += ROWS_PER_TAB)
     tabs.push(receipts.slice(i, i + ROWS_PER_TAB));
   if (!tabs.length) tabs.push([]);
 
   // ── Style constants ──────────────────────────────────────────────────────
-  const NAVY   = "374a82";
+  const NAVY   = "374A82";
   const YELLOW = "FFFFC0";
   const WHITE  = "FFFFFF";
   const LGRAY  = "DCDCDC";
-  const LBLUE  = "E8ECFF";
+  const LBLUE  = "DCE6F1";
 
   const navyFill   = { patternType:"solid", fgColor:{rgb:NAVY},   bgColor:{indexed:64} };
   const yellowFill = { patternType:"solid", fgColor:{rgb:YELLOW},  bgColor:{indexed:64} };
@@ -3768,41 +3777,51 @@ function exportExcel() {
   const lgrayFill  = { patternType:"solid", fgColor:{rgb:LGRAY},   bgColor:{indexed:64} };
   const lblueFill  = { patternType:"solid", fgColor:{rgb:LBLUE},   bgColor:{indexed:64} };
 
-  const thinBorderSide = { style:"thin", color:{rgb:"AAAAAA"} };
+  const thinBorderSide = { style:"thin",   color:{rgb:"AAAAAA"} };
   const medBorderSide  = { style:"medium", color:{rgb:NAVY} };
-  const hairBorderSide = { style:"hair",   color:{rgb:"AAAAAA"} };
+  const hairBorderSide = { style:"hair",   color:{rgb:"CCCCCC"} };
 
   const allThin  = { top:thinBorderSide, bottom:thinBorderSide, left:thinBorderSide, right:thinBorderSide };
   const allMed   = { top:medBorderSide,  bottom:medBorderSide,  left:medBorderSide,  right:medBorderSide  };
   const allHair  = { top:hairBorderSide, bottom:hairBorderSide, left:hairBorderSide, right:hairBorderSide };
-  const botMed   = { bottom:medBorderSide };
 
-  function navyHdrStyle(bold=true, size=10) {
+  function navyHdrStyle(bold=true, size=9) {
     return { fill:navyFill, font:{name:"Arial",bold,color:{rgb:WHITE},sz:size},
              alignment:{horizontal:"center",vertical:"center",wrapText:true},
              border:allMed };
   }
-  function dataStyle(fillColor, size=8, hAlign='left') {
-    const fill = fillColor === 'yellow' ? yellowFill : whiteFill;
+  function dataStyle(alt, size=8, hAlign='left') {
+    const fill = alt ? yellowFill : whiteFill;
     return { fill, font:{name:"Arial",sz:size}, alignment:{horizontal:hAlign,vertical:"center",wrapText:false}, border:allHair };
   }
   function totStyle() {
     return { fill:navyFill, font:{name:"Arial",bold:true,color:{rgb:WHITE},sz:9},
-             alignment:{horizontal:"right",vertical:"center"}, border:allMed, numFmt:"#,##0.00" };
+             alignment:{horizontal:"right",vertical:"center"}, border:allMed };
   }
   function hdrLabelStyle() {
     return { fill:lgrayFill, font:{name:"Arial",bold:true,color:{rgb:NAVY},sz:8},
-             alignment:{horizontal:"right",vertical:"center",wrapText:true},
-             border:{right:thinBorderSide} };
+             alignment:{horizontal:"right",vertical:"center",wrapText:true}, border:{right:thinBorderSide} };
   }
   function hdrValueStyle() {
     return { fill:whiteFill, font:{name:"Arial",sz:9},
-             alignment:{horizontal:"left",vertical:"center"},
-             border:{bottom:thinBorderSide} };
+             alignment:{horizontal:"left",vertical:"center"}, border:{bottom:thinBorderSide} };
   }
 
+  // Track all formula cells for JSZip injection: { sheetIdx, addr, formula }
+  const formulaCells = [];
+
   // Helper: set a cell with style
-  function sc(ws, addr, value, style) {
+  // Signature: sc(ws, wsIdx, addr, value, style)  — for sheets that may have formulas
+  //            sc(ws, addr, value, style)          — for the Summary sheet (no formulas)
+  function sc(ws, wsIdxOrAddr, addrOrValue, valueOrStyle, styleOrUndef) {
+    let wsIdx, addr, value, style;
+    if (typeof wsIdxOrAddr === 'number') {
+      // 5-arg form: sc(ws, wsIdx, addr, value, style)
+      wsIdx = wsIdxOrAddr; addr = addrOrValue; value = valueOrStyle; style = styleOrUndef;
+    } else {
+      // 4-arg form: sc(ws, addr, value, style)
+      wsIdx = -1; addr = wsIdxOrAddr; value = addrOrValue; style = valueOrStyle;
+    }
     if (value === null || value === undefined) {
       ws[addr] = { t:'s', v:'', s:style||{} };
       return;
@@ -3811,7 +3830,9 @@ function exportExcel() {
     if (typeof value === 'number') {
       cell = { t:'n', v:value };
     } else if (typeof value === 'string' && value[0] === '=') {
-      cell = { t:'n', f:value.slice(1) };
+      const formula = value.slice(1);
+      cell = { t:'n', v:0 };
+      if (wsIdx >= 0) formulaCells.push({ sheetIdx: wsIdx, addr, formula });
     } else {
       cell = { t:'s', v:String(value) };
     }
@@ -3827,175 +3848,144 @@ function exportExcel() {
   // Column layout (1-indexed)
   const CA=1, CB=2, CC=3, CD=4, CE=5, CF=6, CM=13, CN=14, CO=15, CP=16, CQ=17;
 
-  // Build column widths array (xlsx-style uses {wpx} or {wch})
   const colWidths = [
-    {wch:12}, // A Date
-    {wch:10}, // B Travel
-    {wch:10}, // C Meals
-    {wch:10}, // D Lodging
-    {wch:7},  // E Misc
-    {wch:32}, // F Desc start (merged F:M)
-    {wch:5},{wch:5},{wch:5},{wch:5},{wch:5},{wch:5},{wch:5}, // G-M (mostly hidden in merge)
-    {wch:13}, // N USD
-    {wch:13}, // O Foreign
-    {wch:10}, // P Co Crdt
-    {wch:7},  // Q No Rcpt
+    {wch:12.75}, // A Date
+    {wch:10.75}, // B Travel
+    {wch:10},    // C Meals
+    {wch:10},    // D Lodging
+    {wch:7.75},  // E Misc
+    {wch:32.75}, // F Desc (merged F:M)
+    {wch:5},{wch:5},{wch:5},{wch:5},{wch:5},{wch:5},{wch:5}, // G-M
+    {wch:13.75}, // N USD
+    {wch:11.5},  // O Foreign
+    {wch:10},    // P Co Crdt
+    {wch:9},     // Q No Rcpt
   ];
 
   const wb = { SheetNames:[], Sheets:{} };
 
   tabs.forEach((tabReceipts, tabIdx) => {
     const ws = {};
+    const wi = tabIdx; // sheet index for formula tracking
 
-    // ── Row heights (using !rows array) ──────────────────────────────
-    ws['!rows'] = [];
-    ws['!rows'][0] = {hpx:30};  // row 1  title
-    ws['!rows'][1] = {hpx:28};  // row 2  header fields
-    ws['!rows'][2] = {hpx:28};  // row 3  header fields
-    ws['!rows'][3] = {hpx:6};   // row 4  spacer
-    ws['!rows'][4] = {hpx:6};   // row 5  spacer
-    ws['!rows'][5] = {hpx:40};  // row 6  col headers
-    ws['!rows'][6] = {hpx:8};   // row 7  spacer
-    ws['!rows'][7] = {hpx:18};  // row 8  sub-headers
-    for(let r=8;r<35;r++) ws['!rows'][r]={hpx:16}; // data rows 9-35
-    ws['!rows'][35] = {hpx:18}; // row 36 totals
-    ws['!rows'][36] = {hpx:28}; // row 37 footer
-    ws['!rows'][37] = {hpx:18}; // row 38 grand total
+    // ── Row heights ───────────────────────────────────────────────────
+    ws['!rows'] = Array(45).fill(null).map(()=>({}));
+    ws['!rows'][0] = {hpx:18};   // row 1 title
+    ws['!rows'][1] = {hpx:24};   // row 2 header
+    ws['!rows'][2] = {hpx:36};   // row 3 header
+    ws['!rows'][3] = {hpx:36};   // row 4 col headers
+    for(let r=4;r<31;r++) ws['!rows'][r]={hpx:15}; // rows 5-31 data
+    ws['!rows'][31] = {hpx:16.5};  // row 32 totals
+    ws['!rows'][32] = {hpx:16.5};  // row 33 footer
+    ws['!rows'][33] = {hpx:19.5};  // row 34 grand total
+    ws['!rows'][34] = {hpx:16.5};  // row 35
+    ws['!rows'][35] = {hpx:24.75}; // row 36 mileage
+    ws['!rows'][36] = {hpx:15.75}; // row 37
+    ws['!rows'][37] = {hpx:15};    // row 38 sig
+    ws['!rows'][39] = {hpx:15};    // row 40
 
     ws['!cols'] = colWidths;
 
-    // ── Merges ───────────────────────────────────────────────────────
+    // ── Merges — exact copy of template merge map ─────────────────────
     ws['!merges'] = [];
     const addMerge = (r1,c1,r2,c2) => ws['!merges'].push({s:{r:r1-1,c:c1-1},e:{r:r2-1,c:c2-1}});
 
-    // Row 1: full title bar
-    addMerge(1,CA, 1,CQ);
+    addMerge(1, 1, 1,17);   // A1:Q1  title
+    addMerge(2, 2, 2, 4);   // B2:D2  Employee Name value
+    addMerge(2, 6, 2,13);   // F2:M2  Trip Location value
+    addMerge(3, 2, 3, 4);   // B3:D3  Date Submitted value
+    addMerge(3, 6, 3,13);   // F3:M3  Purpose value
+    addMerge(4, 6, 4,13);   // F4:M4  Description header
+    addMerge(4,14, 4,15);   // N4:O4  Amount header
+    for(let r=5; r<=31; r++) addMerge(r,6, r,13); // F:M data rows
+    addMerge(32, 6,32,13);  // F32:M32  Subtotal label
+    addMerge(33, 1,34, 3);  // A33:C34  footnote (spans rows 33-34)
+    addMerge(33, 6,33,10);  // F33:J33  itemized receipts note
+    addMerge(33,11,33,13);  // K33:M33  "Total of Page:" label
+    addMerge(34,10,34,13);  // J34:M34  "Grand Total" label
+    // Mileage section (rows 36-41)
+    addMerge(36, 6,38, 6);  // F36:F38  Miles label
+    addMerge(36, 7,38, 8);  // G36:H38  mileage description
+    addMerge(38, 4,38, 5);  // D38:E38  Date sig label
+    addMerge(38,11,38,17);  // K38:Q38  Employee Signature line
+    addMerge(39, 4,39, 5);  // D39:E39
+    addMerge(39, 7,39, 8);  // G39:H39
+    addMerge(39,11,39,17);  // K39:Q39
+    addMerge(40, 4,40, 5);  // D40:E40
+    addMerge(40, 7,40, 8);  // G40:H40
+    addMerge(40,11,40,17);  // K40:Q40
+    addMerge(41,11,41,17);  // K41:Q41
 
-    // Row 2 header values
-    addMerge(2,CB, 2,CD);       // Employee Name value
-    addMerge(2,CF, 2,CM);       // Trip Location value
-
-    // Row 3 header values
-    addMerge(3,CB, 3,CD);       // Date Submitted value
-    addMerge(3,CF, 3,CM);       // Purpose value
-
-    // Rows 4,5 spacers
-    addMerge(4,CA, 4,CQ);
-    addMerge(5,CA, 5,CQ);
-
-    // Row 6 col headers
-    addMerge(6,CF, 6,CM);       // Description header
-    addMerge(6,CN, 6,CO);       // Amount header
-
-    // Row 8 sub-header (USD/Foreign merged across data cols)
-    // No specific merges needed — cells B-E share the totals area
-
-    // Data rows 9-35: merge F:M for description (27 rows)
-    for(let ri=0;ri<27;ri++) addMerge(9+ri,CF, 9+ri,CM);
-
-    // Row 36 totals: merge F:M
-    addMerge(36,CF, 36,CM);
-
-    // Row 37 footer
-    addMerge(37,CA, 37,CF);    // A:F note
-    addMerge(37,CF+1, 37,10);  // G:J itemized note
-    addMerge(37,11, 37,CM);    // K:M "Total of Page" label
-
-    // Row 38 grand total
-    addMerge(38,11, 38,CM);    // K:M "Grand Total" label
-
-    // Sig rows
-    addMerge(41,CB, 41,CE);    // Date sig line
-    addMerge(41,CF, 41,CM);    // "Employee Signature:" label
-    addMerge(41,CN, 41,CQ);    // sig line
-
-    // ── ROW 1: Title banner ──────────────────────────────────────────
-    sc(ws,'A1', "Oil Center Research Int'l Business Expense Report 2026",
-      { fill:navyFill, font:{name:"Arial",bold:true,color:{rgb:WHITE},sz:14},
+    // ── ROW 1: Title ──────────────────────────────────────────────────
+    sc(ws,wi,'A1', "Oil Center Research Int'l Business Expense Report 2026",
+      { fill:navyFill, font:{name:"Arial",bold:true,color:{rgb:WHITE},sz:12},
         alignment:{horizontal:"center",vertical:"center"} });
 
-    // ── ROW 2: Header fields ─────────────────────────────────────────
-    sc(ws,'A2', "Employee Name:", hdrLabelStyle());
-    sc(ws,'B2', rep, hdrValueStyle());
-    sc(ws,'E2', "Trip Location:", hdrLabelStyle());
-    sc(ws,'F2', dest, hdrValueStyle());
-    sc(ws,'N2', "From:", hdrLabelStyle());
-    sc(ws,'O2', s ? fmtDate(s) : '', hdrValueStyle());
-    sc(ws,'P2', "To:", hdrLabelStyle());
-    sc(ws,'Q2', e ? fmtDate(e) : '', hdrValueStyle());
+    // ── ROW 2: Header fields (labels at A,E,N,P — values in merged B:D, F:M, O, Q) ──
+    sc(ws,wi,'A2', "Employee Name:",    hdrLabelStyle());
+    sc(ws,wi,'B2', rep,                 hdrValueStyle());   // fills B2:D2
+    sc(ws,wi,'E2', "Trip Location:",    hdrLabelStyle());
+    sc(ws,wi,'F2', dest,                hdrValueStyle());   // fills F2:M2
+    sc(ws,wi,'N2', "From:",             hdrLabelStyle());
+    sc(ws,wi,'O2', s ? fmtDate(s) : '', hdrValueStyle());
+    sc(ws,wi,'P2', "To:",               hdrLabelStyle());
+    sc(ws,wi,'Q2', e ? fmtDate(e) : '', hdrValueStyle());
 
-    // ── ROW 3: Header fields ─────────────────────────────────────────
-    sc(ws,'A3', "Date Submitted:", hdrLabelStyle());
-    sc(ws,'B3', today, hdrValueStyle());
-    sc(ws,'E3', "Purpose of Trip:", hdrLabelStyle());
-    sc(ws,'F3', purp, hdrValueStyle());
-    sc(ws,'N3', "Foreign Currency:", hdrLabelStyle());
-    sc(ws,'O3', primaryCurrency, hdrValueStyle());
-    sc(ws,'P3', "US $ Exchange Rate:", hdrLabelStyle());
-    sc(ws,'Q3', "$1 :", hdrValueStyle());
+    // ── ROW 3: Header fields ──────────────────────────────────────────
+    sc(ws,wi,'A3', "Date Submitted:",    hdrLabelStyle());
+    sc(ws,wi,'B3', today,                hdrValueStyle());  // fills B3:D3
+    sc(ws,wi,'E3', "Purpose of Trip:",   hdrLabelStyle());
+    sc(ws,wi,'F3', purp,                 hdrValueStyle());  // fills F3:M3
+    sc(ws,wi,'N3', "Foreign Currency:",  hdrLabelStyle());
+    sc(ws,wi,'O3', primaryCurrency,      hdrValueStyle());
+    sc(ws,wi,'P3', "US $ Exchange Rate:", hdrLabelStyle());
+    sc(ws,wi,'Q3', "$1 :",               hdrValueStyle());
 
-    // ── ROWS 4-5: Navy spacers ───────────────────────────────────────
-    sc(ws,'A4', '', { fill:navyFill });
-    sc(ws,'A5', '', { fill:navyFill });
-
-    // ── ROW 6: Column headers ────────────────────────────────────────
+    // ── ROW 4: Column headers ─────────────────────────────────────────
     const colHdrSt = navyHdrStyle(true, 8);
-    sc(ws,'A6', 'Date', colHdrSt);
-    sc(ws,'B6', 'Travel\nExpense\n& Tips *', colHdrSt);
-    sc(ws,'C6', 'Meals\n& Tips', colHdrSt);
-    sc(ws,'D6', 'Lodging\n& Tips', colHdrSt);
-    sc(ws,'E6', 'Misc.', colHdrSt);
-    sc(ws,'F6', 'Description of Other Fully Deductible Expenses\n(Include company name, restaurant, taxi, hotel, etc.)', colHdrSt);
-    sc(ws,'N6', 'Amount of Fully\nDeductible Expenses', colHdrSt);
-    sc(ws,'P6', 'Co. Crdt\nCard', colHdrSt);
-    sc(ws,'Q6', 'No\nRcpt', colHdrSt);
+    sc(ws,wi,'A4', 'Date', colHdrSt);
+    sc(ws,wi,'B4', 'Travel\nExpense\n& Tips *', colHdrSt);
+    sc(ws,wi,'C4', 'Meals\n& Tips', colHdrSt);
+    sc(ws,wi,'D4', 'Lodging\n& Tips', colHdrSt);
+    sc(ws,wi,'E4', 'Misc.', colHdrSt);
+    sc(ws,wi,'F4', 'Description of Other Fully Deductible Expenses\n(Include company name, restaurant, taxi, hotel, etc.)', colHdrSt);
+    sc(ws,wi,'N4', 'Amount of Fully\nDeductible Expenses', colHdrSt);
+    sc(ws,wi,'P4', 'Co. Crdt\nCard', colHdrSt);
+    sc(ws,wi,'Q4', 'No\nRcpt', colHdrSt);
+    // Fill G-M and O in header with navy (they're inside merges)
+    for(let c=CF+1;c<=CM;c++) sc(ws,wi,`${col(c)}4`,'',{fill:navyFill});
+    sc(ws,wi,'O4','',{fill:navyFill});
 
-    // Fill spacer cols with navy
-    for(let c=CF+1;c<=CM;c++) sc(ws,`${col(c)}6`,'',{fill:navyFill});
-    sc(ws,'O6','',{fill:navyFill});
-
-    // ── ROW 7: Spacer ─────────────────────────────────────────────────
-    for(let c=CA;c<=CQ;c++) sc(ws,`${col(c)}7`,'',{fill:lgrayFill});
-
-    // ── ROW 8: Sub-headers ────────────────────────────────────────────
-    const subHdrSt = { fill:lgrayFill, font:{name:"Arial",bold:true,color:{rgb:NAVY},sz:8},
-                       alignment:{horizontal:"center",vertical:"center",wrapText:true},
-                       border:{bottom:medBorderSide} };
-    for(let c=CA;c<=CQ;c++) sc(ws,`${col(c)}8`,'',subHdrSt);
-    sc(ws,'N8', 'USD', subHdrSt);
-    sc(ws,'O8', 'Foreign\nCurrency', subHdrSt);
-
-    // ── ROWS 9-35: Data rows ──────────────────────────────────────────
+    // ── ROWS 5-31: Data rows ──────────────────────────────────────────
     const USD_FMT = '#,##0.00';
-    for(let ri=0;ri<ROWS_PER_TAB;ri++){
-      const rowNum = 9 + ri;
+    for(let ri=0; ri<ROWS_PER_TAB; ri++){
+      const rowNum = DATA_START + ri;
       const r = tabReceipts[ri] || null;
-      const rowFill = ri%2===0 ? 'yellow' : 'white';
+      const alt = ri%2===0;
 
       const isTravel  = r && r.category==='travel';
       const isMeals   = r && r.category==='meals';
       const isLodging = r && r.category==='lodging';
       const isMisc    = r && !isTravel && !isMeals && !isLodging;
-      const usd = r ? (r.usdAmt||null) : null;
-      const fAmt = r ? (r.foreignAmt||null) : null;
+      const usd  = r && r.usdAmt  ? parseFloat(r.usdAmt)  || null : null;
+      const fAmt = r && r.foreignAmt ? parseFloat(r.foreignAmt) || null : null;
 
-      // Fill all columns
+      // Fill all columns with alternating background
       for(let c=CA;c<=CQ;c++){
         const a = `${col(c)}${rowNum}`;
-        if(!ws[a]) sc(ws,a,'',dataStyle(rowFill,8,'center'));
+        if(!ws[a]) sc(ws,wi,a,'',dataStyle(alt,8,'center'));
       }
 
       // Date
-      if(r && r.date) sc(ws,`A${rowNum}`, fmtDate(r.date),
-        {...dataStyle(rowFill,8,'center')});
+      if(r && r.date) sc(ws,wi,`A${rowNum}`, fmtDate(r.date), {...dataStyle(alt,8,'center')});
 
       // Amount cols
       if(usd){
-        const amtStyle = {...dataStyle(rowFill,8,'right'), numFmt:USD_FMT};
-        if(isTravel)  sc(ws,`B${rowNum}`, usd, amtStyle);
-        if(isMeals)   sc(ws,`C${rowNum}`, usd, amtStyle);
-        if(isLodging) sc(ws,`D${rowNum}`, usd, amtStyle);
-        if(isMisc)    sc(ws,`E${rowNum}`, usd, amtStyle);
+        const amtStyle = {...dataStyle(alt,8,'right'), numFmt:USD_FMT};
+        if(isTravel)  sc(ws,wi,`B${rowNum}`, usd, amtStyle);
+        if(isMeals)   sc(ws,wi,`C${rowNum}`, usd, amtStyle);
+        if(isLodging) sc(ws,wi,`D${rowNum}`, usd, amtStyle);
+        if(isMisc)    sc(ws,wi,`E${rowNum}`, usd, amtStyle);
       }
 
       // Description (merged F:M)
@@ -4003,104 +3993,96 @@ function exportExcel() {
         const vendor = r.vendor||'';
         const desc   = r.description===`[Batch — review & add USD amount]`?'':r.description||'';
         const full   = vendor + (desc ? ` — ${desc}` : '');
-        sc(ws,`F${rowNum}`, full, {...dataStyle(rowFill,8,'left')});
+        sc(ws,wi,`F${rowNum}`, full, {...dataStyle(alt,8,'left')});
       }
 
-      // USD total col N = SUM(B:E) with cached value (no t: property — xlsx-style needs this)
-      const rowTotal = (isTravel&&usd?usd:0)+(isMeals&&usd?usd:0)+(isLodging&&usd?usd:0)+(isMisc&&usd?usd:0);
-      ws[`N${rowNum}`] = { f:`SUM(B${rowNum}:E${rowNum})`, v:rowTotal,
-        s:{...dataStyle(rowFill,8,'right'), numFmt:USD_FMT} };
+      // N = SUM(B:E) for this row — formula injected via JSZip
+      const rowAmt = (isTravel&&usd?usd:0)+(isMeals&&usd?usd:0)+(isLodging&&usd?usd:0)+(isMisc&&usd?usd:0);
+      ws[`N${rowNum}`] = { t:'n', v:rowAmt, s:{...dataStyle(alt,8,'right'), numFmt:USD_FMT} };
+      formulaCells.push({ sheetIdx:wi, addr:`N${rowNum}`, formula:`SUM(B${rowNum}:E${rowNum})` });
 
-      // Foreign
-      if(fAmt){
-        sc(ws,`O${rowNum}`, fAmt,
-          {...dataStyle(rowFill,8,'right'), numFmt:USD_FMT});
-      }
+      // Foreign amount
+      if(fAmt) sc(ws,wi,`O${rowNum}`, fAmt, {...dataStyle(alt,8,'right'), numFmt:USD_FMT});
 
-      // Co credit card
-      if(usd){
-        sc(ws,`P${rowNum}`, 'VISA',
-          {...dataStyle(rowFill,7,'center'),
-           font:{name:"Arial",sz:7,color:{rgb:NAVY}}});
-      }
+      // Co. Credit Card
+      if(usd) sc(ws,wi,`P${rowNum}`, 'VISA',
+        {...dataStyle(alt,7,'center'), font:{name:"Arial",sz:7,color:{rgb:NAVY}}});
     }
 
-    // ── ROW 36: Totals ────────────────────────────────────────────────
+    // ── ROW 32: Totals ────────────────────────────────────────────────
     const tst = totStyle();
-    sc(ws,'A36','TOTALS',{...tst, alignment:{horizontal:"center",vertical:"center"}});
-    // Pre-compute totals so xlsx-style has cached values (v:) alongside formulas
+    sc(ws,wi,'A32','TOTALS',{...tst, alignment:{horizontal:"center",vertical:"center"}});
+    // Cached sums for display; JSZip injects the real SUM formulas
     const sumB = tabReceipts.reduce((a,r)=>a+(r.category==='travel'?(parseFloat(r.usdAmt)||0):0),0);
     const sumC = tabReceipts.reduce((a,r)=>a+(r.category==='meals'?(parseFloat(r.usdAmt)||0):0),0);
     const sumD = tabReceipts.reduce((a,r)=>a+(r.category==='lodging'?(parseFloat(r.usdAmt)||0):0),0);
-    const sumE = tabReceipts.reduce((a,r)=>a+(r.category==='misc'?(parseFloat(r.usdAmt)||0):0),0);
+    const sumE = tabReceipts.reduce((a,r)=>a+(!(r.category==='travel'||r.category==='meals'||r.category==='lodging')?(parseFloat(r.usdAmt)||0):0),0);
     const sumN = sumB+sumC+sumD+sumE;
     const sumO = tabReceipts.reduce((a,r)=>a+(parseFloat(r.foreignAmt)||0),0);
-    ws['B36']={f:'SUM(B9:B35)',v:sumB,s:{...tst,numFmt:USD_FMT}};
-    ws['C36']={f:'SUM(C9:C35)',v:sumC,s:{...tst,numFmt:USD_FMT}};
-    ws['D36']={f:'SUM(D9:D35)',v:sumD,s:{...tst,numFmt:USD_FMT}};
-    ws['E36']={f:'SUM(E9:E35)',v:sumE,s:{...tst,numFmt:USD_FMT}};
-    sc(ws,'F36','Subtotal of Page',{...tst, alignment:{horizontal:"center",vertical:"center"}});
-    ws['N36']={f:'SUM(N9:N35)',v:sumN,s:{...tst,numFmt:USD_FMT}};
-    ws['O36']={f:'SUM(O9:O35)',v:sumO,s:{...tst,numFmt:USD_FMT}};
-    // Fill remaining merged cols
-    for(let c=CF+1;c<=CM;c++) sc(ws,`${col(c)}36`,'',{fill:navyFill,border:allMed});
-    for(let c of[CP,CQ]) sc(ws,`${col(c)}36`,'',{fill:navyFill,border:allMed});
+    ws['B32']={t:'n',v:sumB,s:{...tst,numFmt:USD_FMT}}; formulaCells.push({sheetIdx:wi,addr:'B32',formula:'SUM(B5:B31)'});
+    ws['C32']={t:'n',v:sumC,s:{...tst,numFmt:USD_FMT}}; formulaCells.push({sheetIdx:wi,addr:'C32',formula:'SUM(C5:C31)'});
+    ws['D32']={t:'n',v:sumD,s:{...tst,numFmt:USD_FMT}}; formulaCells.push({sheetIdx:wi,addr:'D32',formula:'SUM(D5:D31)'});
+    ws['E32']={t:'n',v:sumE,s:{...tst,numFmt:USD_FMT}}; formulaCells.push({sheetIdx:wi,addr:'E32',formula:'SUM(E5:E31)'});
+    sc(ws,wi,'F32','Subtotal of Page',{...tst, alignment:{horizontal:"center",vertical:"center"}});
+    ws['N32']={t:'n',v:sumN,s:{...tst,numFmt:USD_FMT}}; formulaCells.push({sheetIdx:wi,addr:'N32',formula:'SUM(N5:N31)'});
+    ws['O32']={t:'n',v:sumO,s:{...tst,numFmt:USD_FMT}}; formulaCells.push({sheetIdx:wi,addr:'O32',formula:'SUM(O5:O31)'});
+    for(let c=CF+1;c<=CM;c++) sc(ws,wi,`${col(c)}32`,'',{fill:navyFill,border:allMed});
+    for(let c of[CP,CQ]) sc(ws,wi,`${col(c)}32`,'',{fill:navyFill,border:allMed});
 
-    // ── ROW 37: Footer ────────────────────────────────────────────────
-    const footFont = {name:"Arial",sz:7,italic:true,color:{rgb:"444444"}};
-    sc(ws,'A37','* Travel Expenses include items such as taxi, tolls, car rental, parking, etc.',
-      {font:footFont, alignment:{horizontal:"left",vertical:"center",wrapText:true}});
-
-    sc(ws,'G37','Itemized receipts must be attached for all items listed.',
-      {font:{name:"Arial",sz:8,bold:true,color:{rgb:NAVY}},
-       alignment:{horizontal:"center",vertical:"center"}});
-
-    sc(ws,'K37','Total of Page:',
-      {font:{name:"Arial",bold:true,sz:9,color:{rgb:NAVY}},
-       alignment:{horizontal:"right",vertical:"center"}});
-
-    ws['N37'] = {f:'N36',v:sumN,
+    // ── ROWS 33-34: Footer / Total of Page / Grand Total ─────────────
+    // A33:C34 merged — footnote text (anchor at A33)
+    const footFont = {name:"Arial",sz:7,italic:true,color:{rgb:"555555"}};
+    sc(ws,wi,'A33','* Travel Expenses include items such as taxi, tolls, car rental, parking, etc.',
+      {font:footFont, alignment:{horizontal:"left",vertical:"top",wrapText:true}});
+    // F33:J33 — itemized receipts note
+    sc(ws,wi,'F33','Itemized receipts must be attached for all items listed.',
+      {font:{name:"Arial",sz:8,bold:true,color:{rgb:NAVY}}, alignment:{horizontal:"center",vertical:"center"}});
+    // K33:M33 — "Total of Page:" label
+    sc(ws,wi,'K33','Total of Page:',
+      {font:{name:"Arial",bold:true,sz:9,color:{rgb:NAVY}}, alignment:{horizontal:"right",vertical:"center"}});
+    // N33 — Total of Page value (=N32)
+    ws['N33']={t:'n',v:sumN,
       s:{fill:lblueFill, font:{name:"Arial",bold:true,sz:10,color:{rgb:NAVY}},
-         alignment:{horizontal:"right",vertical:"center"},
-         border:allMed, numFmt:USD_FMT}};
+         alignment:{horizontal:"right",vertical:"center"}, border:allMed, numFmt:USD_FMT}};
+    formulaCells.push({sheetIdx:wi, addr:'N33', formula:'N32'});
 
-    // ── ROW 38: Grand Total (cascading across all pages) ──────────────
-    sc(ws,'K38','Grand Total (all pages):',
-      {font:{name:"Arial",bold:true,sz:9,color:{rgb:NAVY}},
-       alignment:{horizontal:"right",vertical:"center"}});
-
-    // Every page shows grand total = sum of all previous pages' N36 + this page's N36
-    // This matches the 4-page template pattern exactly
-    const prevRefs = tabs.slice(0, tabIdx).map((_,i)=>`'OCR-Intl (${i+1})'!N36`);
-    const gtFormula = prevRefs.length ? prevRefs.join('+') + '+N36' : 'N36';
-    const grandTotal = tabs.slice(0, tabIdx+1).reduce((acc,tr)=>acc+tr.reduce((a,r)=>a+(parseFloat(r.usdAmt)||0),0),0);
-    ws['N38'] = {f:gtFormula, v:grandTotal,
+    // J34:M34 — "Grand Total" label
+    sc(ws,wi,'J34','Grand Total (last page):',
+      {font:{name:"Arial",bold:true,sz:9,color:{rgb:NAVY}}, alignment:{horizontal:"right",vertical:"center"}});
+    // N34 — Grand Total value (cascading across pages)
+    // Page 1: =N33  |  Page 2: ='OCR-Intl (1)'!N32+N32  |  Page 3+: adds prior sheets
+    let gtFormula;
+    if(tabIdx === 0){
+      gtFormula = 'N33';
+    } else {
+      const prevRefs = Array.from({length:tabIdx},(_,i)=>`'OCR-Intl (${i+1})'!N32`);
+      gtFormula = prevRefs.join('+') + '+N32';
+    }
+    const grandTotal = tabs.slice(0,tabIdx+1).reduce((acc,tr)=>acc+tr.reduce((a,r)=>a+(parseFloat(r.usdAmt)||0),0),0);
+    ws['N34']={t:'n',v:grandTotal,
       s:{fill:navyFill, font:{name:"Arial",bold:true,sz:11,color:{rgb:WHITE}},
          alignment:{horizontal:"right",vertical:"center"},
-         border:{top:{style:"thick",color:{rgb:NAVY}},bottom:{style:"thick",color:{rgb:NAVY}},
-                 left:{style:"thick",color:{rgb:NAVY}},right:{style:"thick",color:{rgb:NAVY}}},
-         numFmt:USD_FMT}};
+         border:allMed, numFmt:USD_FMT}};
+    formulaCells.push({sheetIdx:wi, addr:'N34', formula:gtFormula});
 
-    // ── ROWS 39-41: Mileage & Signature ──────────────────────────────
-    sc(ws,'F39','Miles',{font:{name:"Arial",bold:true,sz:8,color:{rgb:NAVY}},
-      alignment:{horizontal:"center"}});
-    sc(ws,'H39','Business Mileage @ $0.76 per mile',
-      {font:{name:"Arial",sz:8,color:{rgb:NAVY}}});
-    sc(ws,'F40','Business Miles',{font:{name:"Arial",sz:8}});
+    // ── ROWS 36-41: Mileage & Signature (matches template exactly) ───
+    sc(ws,wi,'F36','\nMiles',{font:{name:"Arial",bold:true,sz:8,color:{rgb:NAVY}},alignment:{horizontal:"center",vertical:"center",wrapText:true}});
+    sc(ws,wi,'G36','Business Mileage @\n$0.725 per mile',{font:{name:"Arial",sz:8,color:{rgb:NAVY}},alignment:{wrapText:true}});
+    sc(ws,wi,'F37','Business Miles',{font:{name:"Arial",sz:8}});
+    // F39 = mileage input (user fills in)
+    ws['F39']={t:'n',v:0,s:{border:{bottom:medBorderSide}}};
+    // G39 = mileage $ formula
+    ws['G39']={t:'n',v:0,s:{numFmt:USD_FMT}};
+    formulaCells.push({sheetIdx:wi,addr:'G39',formula:'SUM(F39*0.725)'});
+    sc(ws,wi,'D38','Date',{font:{name:"Arial",bold:true,sz:8,color:{rgb:NAVY}}});
+    sc(ws,wi,'K38','Employee Signature',{font:{name:"Arial",bold:true,sz:9,color:{rgb:NAVY}},alignment:{horizontal:"center"}});
+    sc(ws,wi,'D40','Total',{font:{name:"Arial",bold:true,sz:8,color:{rgb:NAVY}}});
+    ws['F40']={t:'n',v:0,s:{}}; formulaCells.push({sheetIdx:wi,addr:'F40',formula:'F39'});
+    ws['G40']={t:'n',v:0,s:{numFmt:USD_FMT}}; formulaCells.push({sheetIdx:wi,addr:'G40',formula:'SUM(0.725*F40)'});
+    sc(ws,wi,'K40','Approved by Compliance Office Manager or designee',
+      {font:{name:"Arial",sz:8,italic:true,color:{rgb:"666666"}},alignment:{horizontal:"center"}});
 
-    sc(ws,'A41','Date:',{font:{name:"Arial",bold:true,sz:9,color:{rgb:NAVY}}});
-    sc(ws,'F41','Employee Signature:',
-      {font:{name:"Arial",bold:true,sz:9,color:{rgb:NAVY}},
-       alignment:{horizontal:"right"}});
-    sc(ws,'B41','',{border:{bottom:{style:"medium",color:{rgb:"000000"}}}});
-    sc(ws,'N41','',{border:{bottom:{style:"medium",color:{rgb:"000000"}}}});
-
-    addMerge(43,CA, 43,CQ);
-    sc(ws,'A43','Approved by Compliance Office Manager or designee',
-      {font:{name:"Arial",sz:8,italic:true,color:{rgb:"666666"}},
-       alignment:{horizontal:"center"}});
-
-    ws['!ref'] = `A1:${col(CQ)}46`;
+    ws['!ref'] = `A1:${col(CQ)}42`;
 
     // ── Print/Page setup: landscape, scaled to fit on one page ──────
     // xlsx-style only respects orientation and scale (fitToPage is ignored)
@@ -4119,6 +4101,9 @@ function exportExcel() {
     wb.SheetNames.push(sheetName);
     wb.Sheets[sheetName] = ws;
   });
+
+  // ── Grand total across all pages ──────────────────────────────────
+  const grandUSD = receipts.reduce((a,r)=>a+(parseFloat(r.usdAmt)||0),0);
 
   // ── Summary sheet ─────────────────────────────────────────────────
   const sumWs = {};
@@ -4192,13 +4177,61 @@ function exportExcel() {
   wb.Sheets['Summary'] = sumWs;
 
   const fname = `${(dest||'Expenses').replace(/\s+/g,'_')}_Expense_Report.xlsx`;
-  // Browser-safe download
+
+  // ── JSZip formula injection ───────────────────────────────────────────────
+  // xlsx-style silently drops cell.f; we post-process the ZIP to inject <f> tags
   try {
     const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'binary' });
     const buf = new ArrayBuffer(wbout.length);
-    const view = new Uint8Array(buf);
-    for (let i = 0; i < wbout.length; i++) view[i] = wbout.charCodeAt(i) & 0xFF;
-    const blob = new Blob([buf], { type: 'application/octet-stream' });
+    const view8 = new Uint8Array(buf);
+    for (let i = 0; i < wbout.length; i++) view8[i] = wbout.charCodeAt(i) & 0xFF;
+
+    const zip = await JSZip.loadAsync(buf);
+
+    // Group formula cells by sheet index
+    const bySheet = {};
+    formulaCells.forEach(({sheetIdx, addr, formula}) => {
+      if (!bySheet[sheetIdx]) bySheet[sheetIdx] = [];
+      bySheet[sheetIdx].push({addr, formula});
+    });
+
+    // Inject <f> tags into each sheet's XML
+    for (const [sheetIdxStr, cells] of Object.entries(bySheet)) {
+      const sheetNum = parseInt(sheetIdxStr) + 1; // sheets are 1-indexed in zip
+      const path = `xl/worksheets/sheet${sheetNum}.xml`;
+      const xmlFile = zip.file(path);
+      if (!xmlFile) continue;
+      let xml = await xmlFile.async('string');
+
+      cells.forEach(({addr, formula}) => {
+        // Escape formula for XML: & → &amp;  < → &lt;  > → &gt;  ' → &apos;
+        const esc = formula
+          .replace(/&/g,'&amp;')
+          .replace(/</g,'&lt;')
+          .replace(/>/g,'&gt;')
+          .replace(/'/g,'&apos;');
+
+        // Match the cell tag for this address; inject <f> before existing <v> (or at end)
+        // Pattern: <c r="ADDR" ...> ... </c>
+        const cellPat = new RegExp(
+          `(<c\\s[^>]*\\br="${addr}"[^>]*>)((?:(?!<\\/c>)[\\s\\S])*?)(<\\/c>)`, 'g'
+        );
+        xml = xml.replace(cellPat, (match, open, inner, close) => {
+          // Remove any stale <f>...</f> then insert fresh one
+          const innerClean = inner.replace(/<f>[^<]*<\/f>/g, '');
+          if (innerClean.includes('<v>')) {
+            return open + innerClean.replace('<v>', `<f>${esc}</f><v>`) + close;
+          } else {
+            return open + `<f>${esc}</f>` + innerClean + close;
+          }
+        });
+      });
+
+      zip.file(path, xml);
+    }
+
+    const outBuf = await zip.generateAsync({type:'arraybuffer', compression:'DEFLATE'});
+    const blob = new Blob([outBuf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
