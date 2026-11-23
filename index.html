@@ -1181,7 +1181,7 @@ body::before {
     <div style="font-size:13px;font-weight:600;margin:14px 0 8px" id="cc-unmatched-header" hidden>⚠️ Unmatched CC Lines</div>
     <div id="cc-unmatched-list" style="display:flex;flex-direction:column;gap:6px"></div>
     <div id="cc-debug-lines"></div>
-    <div style="font-size:11px;color:var(--text3);margin-top:10px">Auto-matches are by vendor name + date. Use “Assign to receipt” dropdowns for unmatched lines.</div>
+    <div style="font-size:11px;color:var(--text3);margin-top:10px">Suggested matches require your approval. Use “Assign to receipt” dropdowns for unmatched lines.</div>
   </div>
 </div>
 
@@ -2394,7 +2394,9 @@ async function handleCCStatement(input) {
     msgEl.textContent = 'Parsing transactions…';
     progressEl.style.width = '70%';
 
-    const lines = parseCCStatement(fullText);
+    const annotation = data.responses?.[0]?.fullTextAnnotation;
+    const lines = parseCCStatementGeometry(annotation);
+    if (!lines.length) throw new Error('Could not identify complete date / merchant / USD rows. Please upload a clearer statement image. No amounts were applied.');
     msgEl.textContent = `Matching ${lines.length} transactions to receipts…`;
     progressEl.style.width = '90%';
 
@@ -2404,15 +2406,9 @@ async function handleCCStatement(input) {
 
     // ALL parsed lines go into unmatched for manual assignment too
     ccAllLines = lines;
-    // Apply only unambiguous >=90% matches immediately; review other matches first.
-    let autoApplied=0;
-    for (const m of ccMatches) if(m.auto) {
-      m.receipt.usdAmt=m.ccLine.amount;
-      m.receipt.usdPending=false;
-      m.receipt.ccReconciliation={vendor:m.ccLine.vendor,date:m.ccLine.date,usd:m.ccLine.amount,score:m.score};
-      autoApplied++;
-    }
-    if(autoApplied){persist();renderList();}
+    // SAFETY: Never auto-apply statement OCR results until the user verifies them.
+    // OCR confidence alone cannot establish the correctness of financial amounts.
+    for (const m of ccMatches) { m.auto = false; m.confirmed = false; }
     renderCCMatches();
     progressEl.style.width = '100%';
     msgEl.textContent = `Parsed ${lines.length} transaction${lines.length!==1?'s':''} · ${matches.length} auto-matched, ${unmatched.length} need assignment.`;
@@ -2424,6 +2420,61 @@ async function handleCCStatement(input) {
     msgEl.textContent = `✗ Error: ${e.message}`;
     console.error('CC import error', e);
   }
+}
+
+// Geometry-aware bank statement parser. Each visual column and row is processed
+// independently, so OCR reading order cannot shift charges onto adjacent merchants.
+function parseCCStatementGeometry(annotation) {
+  const pages = annotation?.pages || [];
+  const words=[];
+  for (const page of pages) for (const block of (page.blocks||[]))
+    for (const para of (block.paragraphs||[])) for (const w of (para.words||[])) {
+      const value=(w.symbols||[]).map(s=>s.text||'').join('').trim();
+      const v=w.boundingBox?.vertices||[];
+      if(!value||v.length<4) continue;
+      const xs=v.map(a=>a.x||0), ys=v.map(a=>a.y||0);
+      words.push({value,x:Math.min(...xs),cx:(Math.min(...xs)+Math.max(...xs))/2,
+        y:(Math.min(...ys)+Math.max(...ys))/2,h:Math.max(...ys)-Math.min(...ys)});
+    }
+  if(!words.length) return [];
+  const width=pages[0]?.width||Math.max(...words.map(w=>w.cx))*1.05;
+  const heights=words.map(w=>w.h).filter(h=>h>2).sort((a,b)=>a-b);
+  const median=heights[Math.floor(heights.length/2)]||15;
+  const tolerance=Math.max(5,median*.65);
+  const results=[];
+  const datePattern=/\b(\d{1,2})\/(\d{1,2})\/(20\d{2})\b/;
+  for(const side of [0,1]) {
+    const half=words.filter(w=>side===0?w.cx<width/2:w.cx>=width/2).sort((a,b)=>a.y-b.y||a.x-b.x);
+    const rows=[];
+    for(const word of half) {
+      let row=rows.find(r=>Math.abs(r.y-word.y)<=tolerance);
+      if(!row){row={y:word.y,words:[]};rows.push(row);}
+      row.words.push(word);
+    }
+    rows.sort((a,b)=>a.y-b.y);
+    for(const row of rows) {
+      row.words.sort((a,b)=>a.x-b.x);
+      let raw=row.words.map(w=>w.value).join(' ').replace(/\s+([\/.,])/g,'$1').replace(/([\/])\s+/g,'$1');
+      const date=raw.match(datePattern);
+      if(!date) continue;
+      // An amount must be at the right edge of this same visual row.
+      const last=row.words[row.words.length-1];
+      const amtText=last.value.replace(/[$,\s]/g,'');
+      const amtMatch=amtText.match(/^(\d{1,5}\.\d{2})$/);
+      if(!amtMatch) continue;
+      const amount=Number(amtMatch[1]);
+      if(!(amount>0&&amount<50000)) continue;
+      const vendor=raw.replace(date[0],'').replace(/\s*\$?\s*\d{1,5}\.\d{2}\s*$/,'')
+        .replace(/^[\s▸▶►•-]+/,'').replace(/\s+/g,' ').trim();
+      if(vendor.length<3) continue;
+      const yyyy=date[3],mm=date[1].padStart(2,'0'),dd=date[2].padStart(2,'0');
+      const d=new Date(`${yyyy}-${mm}-${dd}T12:00:00Z`);
+      if(Number.isNaN(d.getTime())||d.getUTCMonth()+1!==Number(mm)||d.getUTCDate()!==Number(dd))continue;
+      results.push({date:`${yyyy}-${mm}-${dd}`,vendor,amount,raw,side});
+    }
+  }
+  // Do not deduplicate: repeated purchases at the same merchant are legitimate.
+  return results.sort((a,b)=>b.date.localeCompare(a.date)||a.side-b.side);
 }
 
 // Parse raw OCR text from a CC statement screenshot into transaction lines
