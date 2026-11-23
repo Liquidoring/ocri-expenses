@@ -2399,6 +2399,15 @@ async function handleCCStatement(input) {
 
     // ALL parsed lines go into unmatched for manual assignment too
     ccAllLines = lines;
+    // Apply only unambiguous >=90% matches immediately; review other matches first.
+    let autoApplied=0;
+    for (const m of ccMatches) if(m.auto) {
+      m.receipt.usdAmt=m.ccLine.amount;
+      m.receipt.usdPending=false;
+      m.receipt.ccReconciliation={vendor:m.ccLine.vendor,date:m.ccLine.date,usd:m.ccLine.amount,score:m.score};
+      autoApplied++;
+    }
+    if(autoApplied){persist();renderList();}
     renderCCMatches();
     progressEl.style.width = '100%';
     msgEl.textContent = `Parsed ${lines.length} transaction${lines.length!==1?'s':''} · ${matches.length} auto-matched, ${unmatched.length} need assignment.`;
@@ -2526,67 +2535,69 @@ function parseCCStatement(text) {
     txns.push({ vendor: vendor.substring(0,80), amount, date: parsedDate, raw: line });
   }
 
-  // Deduplicate: same vendor + amount = keep first occurrence
-  const seen = new Set();
-  const deduped = txns.filter(t => {
-    const key = t.vendor.toLowerCase().replace(/\s/g,'').substring(0,12) + '_' + t.amount.toFixed(2);
-    if (seen.has(key)) return false;
-    seen.add(key); return true;
-  });
-
-  console.log('[CC] rawLines:', rawLines.length, '→ stitched:', stitched.length, '→ parsed:', deduped.length,
-    JSON.stringify(deduped.map(t => t.vendor + ' $' + t.amount)));
-  return deduped;
+  // Do not deduplicate by merchant/amount: repeated legitimate charges are common.
+  console.log('[CC] parsed transactions:',txns.length);
+  return txns;
 }
-function vendorSimilarity(a, b) {
-  a = a.toLowerCase().replace(/[^a-z0-9\s]/g,'').trim();
-  b = b.toLowerCase().replace(/[^a-z0-9\s]/g,'').trim();
-  if (a === b) return 1;
-  if (a.includes(b) || b.includes(a)) return 0.85;
-  // Word overlap score
-  const wa = new Set(a.split(/\s+/).filter(w=>w.length>2));
-  const wb = new Set(b.split(/\s+/).filter(w=>w.length>2));
-  let shared = 0;
-  wa.forEach(w => { if([...wb].some(bw => bw.startsWith(w.substring(0,4)) || w.startsWith(bw.substring(0,4)))) shared++; });
-  const denom = Math.max(wa.size, wb.size, 1);
-  return shared / denom;
+// Reconciliation v2: conservative merchant/date/FX validation, one-to-one assignment.
+function ccNormalize(v) {
+  return String(v||'').toLowerCase().replace(/\b(advance|square|sq|pty|ltd|limited|inc|australia|sydney|mascot|au|nsw|the|store|payment|card|pos|purchase|contactless)\b/g,' ')
+    .replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ');
 }
-
-function dateDiffDays(a, b) {
-  if (!a || !b) return 99;
-  return Math.abs((new Date(a) - new Date(b)) / 86400000);
+function vendorSimilarity(a,b) {
+  const x=ccNormalize(a), y=ccNormalize(b);
+  if(!x||!y) return 0;
+  if(x===y) return 1;
+  if(x.length>=5 && y.length>=5 && (x.includes(y)||y.includes(x))) return .93;
+  const xa=x.split(' ').filter(t=>t.length>=3), ya=y.split(' ').filter(t=>t.length>=3);
+  if(!xa.length||!ya.length) return 0;
+  let hits=0;
+  for(const t of xa) if(ya.some(u=>t===u || (t.length>=5&&u.length>=5&&(t.includes(u)||u.includes(t))))) hits++;
+  return hits/Math.max(xa.length,ya.length);
 }
-
-function matchCCToReceipts(ccLines, recs) {
-  const matches   = [];
-  const unmatched = [];
-  const usedReceipts = new Set();
-
-  for (const cc of ccLines) {
-    let best = null, bestScore = 0;
-
-    for (const r of recs) {
-      if (usedReceipts.has(r.id)) continue;
-      if (r.usdOnly) continue;
-      const vScore  = vendorSimilarity(cc.vendor, r.vendor);
-      const dayDiff = dateDiffDays(cc.date, r.date);
-      // If either side has no date, don't penalise — rely on vendor alone
-      const dScore  = (!cc.date || !r.date) ? 0.5
-                    : dayDiff <= 1 ? 1 : dayDiff <= 3 ? 0.7 : dayDiff <= 7 ? 0.4 : dayDiff <= 14 ? 0.2 : 0;
-      const score   = vScore * 0.72 + dScore * 0.28;
-      console.log(`[CC match] "${cc.vendor}" vs "${r.vendor}" → v=${vScore.toFixed(2)} d=${dScore.toFixed(2)} total=${score.toFixed(2)}`);
-      if (score > bestScore && score > 0.28) { best = r; bestScore = score; }
-    }
-
-    if (best) {
-      usedReceipts.add(best.id);
-      matches.push({ ccLine: cc, receipt: best, score: bestScore, confirmed: bestScore >= 0.5 });
-    } else {
-      unmatched.push({ ccLine: cc });
-    }
+function dateDiffDays(a,b) {
+  if(!a||!b) return null;
+  const x=Date.parse(a+'T12:00:00Z'), y=Date.parse(b+'T12:00:00Z');
+  return Number.isFinite(x)&&Number.isFinite(y)?Math.abs(x-y)/86400000:null;
+}
+function ccCurrencyCheck(cc,r) {
+  const foreign=Number(r.foreignAmt), usd=Number(cc.amount);
+  if(!(foreign>0&&usd>0)) return {valid:false,reason:'Missing original receipt amount'};
+  const cur=String(r.currency||'').toUpperCase();
+  if(cur==='USD') return {valid:Math.abs(foreign-usd)<=Math.max(.05,foreign*.025),reason:'USD amount differs'};
+  // Broad guardrails, NOT exchange-rate quotes. A currency outside this list requires review.
+  const bands={AUD:[.45,.90],NZD:[.40,.85],CAD:[.55,.95],EUR:[.85,1.35],GBP:[1.00,1.65],JPY:[.004,.012],MXN:[.035,.09],BRL:[.12,.30]};
+  const band=bands[cur];
+  if(!band) return {valid:false,reason:'Currency needs manual FX verification'};
+  const rate=usd/foreign;
+  return {valid:rate>=band[0]&&rate<=band[1],reason:'USD/foreign amount outside FX plausibility range',rate};
+}
+function matchCCToReceipts(ccLines,recs) {
+  const candidates=[];
+  ccLines.forEach((cc,ci)=>recs.forEach(r=>{
+    if(r.usdOnly) return;
+    const merchant=vendorSimilarity(cc.vendor,r.vendor);
+    const days=dateDiffDays(cc.date,r.date);
+    const fx=ccCurrencyCheck(cc,r);
+    // Never match solely by date or an exchange-rate coincidence.
+    if(merchant<.58 || days===null || days>5 || !fx.valid) return;
+    const dateScore=days<=1?1:days<=3?.75:.4;
+    const score=Math.min(.99,merchant*.73+dateScore*.17+.10);
+    candidates.push({cc,ci,receipt:r,score,merchant,days,fx});
+  }));
+  candidates.sort((a,b)=>b.score-a.score || a.days-b.days);
+  const usedCC=new Set(),usedReceipts=new Set(),matches=[];
+  for(const c of candidates) {
+    if(usedCC.has(c.ci)||usedReceipts.has(c.receipt.id)) continue;
+    const ccAlternatives=candidates.filter(x=>x.ci===c.ci&&x.receipt.id!==c.receipt.id&&!usedReceipts.has(x.receipt.id));
+    const receiptAlternatives=candidates.filter(x=>x.receipt.id===c.receipt.id&&x.ci!==c.ci&&!usedCC.has(x.ci));
+    const next=Math.max(0,...ccAlternatives.map(x=>x.score),...receiptAlternatives.map(x=>x.score));
+    const ambiguous=next>0 && c.score-next<.10;
+    const auto=c.score>=.90 && c.merchant>=.85 && c.days<=3 && !ambiguous;
+    matches.push({...c,ccLine:c.cc,confirmed:auto,auto,ambiguous,reason:ambiguous?'Multiple plausible transactions':'Validated merchant, date and FX amount'});
+    usedCC.add(c.ci);usedReceipts.add(c.receipt.id);
   }
-
-  return { matches, unmatched };
+  return {matches,unmatched:ccLines.filter((_,i)=>!usedCC.has(i)).map(ccLine=>({ccLine}))};
 }
 
 function renderCCMatches() {
@@ -2598,12 +2609,12 @@ function renderCCMatches() {
     const sym = CURRENCY_SYMBOLS[m.receipt.currency] || '';
     const foreign = m.receipt.foreignAmt ? `${sym}${m.receipt.foreignAmt.toFixed(2)} ${m.receipt.currency}` : '';
     const conf = Math.round(m.score * 100);
-    const confColor = conf >= 70 ? 'var(--green)' : conf >= 50 ? 'var(--amber)' : 'var(--red)';
+    const confColor = conf >= 90 && m.auto ? 'var(--green)' : conf >= 70 ? 'var(--amber)' : 'var(--red)';
     return `
     <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:10px 12px;border:1.5px solid var(--border);font-size:12px" id="cc-match-${idx}">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
         <input type="checkbox" id="cc-chk-${idx}" ${m.confirmed?'checked':''} onchange="ccMatches[${idx}].confirmed=this.checked" style="width:14px;height:14px;cursor:pointer">
-        <span style="font-weight:600;color:${confColor};font-size:11px">${conf}% match</span>
+        <span style="font-weight:600;color:${confColor};font-size:11px">${conf}% · ${m.auto ? 'auto-applied' : 'review required'}</span>
         <span style="flex:1"></span>
         <span style="font-weight:700;color:var(--green)">$${m.ccLine.amount.toFixed(2)} USD</span>
       </div>
@@ -2619,6 +2630,7 @@ function renderCCMatches() {
           <div style="color:var(--text2)">${m.receipt.date || '—'} ${foreign ? '· '+foreign : ''}</div>
         </div>
       </div>
+      <div style="font-size:11px;color:var(--text2);margin-top:4px">${escHtml(m.reason)}${m.fx.rate ? ' · implied USD/'+escHtml(m.receipt.currency)+' rate: '+m.fx.rate.toFixed(4) : ''}</div>
       <div style="margin-top:6px;display:flex;align-items:center;gap:6px">
         <label style="font-size:11px;color:var(--text2)">Override USD:</label>
         <input type="number" id="cc-amt-${idx}" value="${m.ccLine.amount.toFixed(2)}" step="0.01" min="0"
@@ -2667,6 +2679,7 @@ function renderCCMatches() {
 function applyCCMatches() {
   let applied = 0;
 
+  const assigned = new Set();
   // Apply confirmed matches
   ccMatches.forEach((m, idx) => {
     const chk = document.getElementById(`cc-chk-${idx}`);
@@ -2675,7 +2688,7 @@ function applyCCMatches() {
       const usd = parseFloat(amtInput?.value || m.ccLine.amount);
       if (!isNaN(usd) && usd > 0) {
         const rec = receipts.find(r => r.id === m.receipt.id);
-        if (rec) { rec.usdAmt = usd; rec.usdPending = false; applied++; }
+        if (rec && !assigned.has(rec.id)) { rec.usdAmt = usd; rec.usdPending = false; assigned.add(rec.id); applied++; }
       }
     }
   });
@@ -2685,7 +2698,9 @@ function applyCCMatches() {
     const sel = document.getElementById(`cc-unmatched-sel-${idx}`);
     if (sel && sel.value) {
       const rec = receipts.find(r => r.id === sel.value);
-      if (rec) { rec.usdAmt = u.ccLine.amount; rec.usdPending = false; applied++; }
+      if (rec && !assigned.has(rec.id) && !ccMatches.some(m=>m.receipt.id===rec.id && document.getElementById(`cc-chk-${ccMatches.indexOf(m)}`)?.checked)) {
+        rec.usdAmt = u.ccLine.amount; rec.usdPending = false; assigned.add(rec.id); applied++;
+      }
     }
   });
 
