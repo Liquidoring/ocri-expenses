@@ -1,3 +1,4 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5,7 +6,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="claude:viewport-fit-sides" content="cover">
 <title>OCRI Trip Receipt Calculator</title>
-<link rel="manifest" href="manifest.json">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -813,18 +813,6 @@ body::before {
     </div>
   </div>
 </header>
-
-<!-- PWA INSTALL BANNER -->
-<div id="pwa-banner" hidden>
-  <div class="pwa-icon">📲</div>
-  <div class="pwa-text">
-    <strong>Install OCRI Receipt Calculator</strong>
-    Add to your home screen for instant one-tap access
-  </div>
-  <button class="pwa-btn" onclick="installPWA()">Install</button>
-  <button class="pwa-dismiss" onclick="dismissPWA()" aria-label="Dismiss">×</button>
-</div>
-
 <!-- QUICK CAPTURE HERO -->
 <div id="quick-capture-hero">
   <div class="hero-label">📍 Snap it now — before you forget</div>
@@ -1313,6 +1301,7 @@ body::before {
         ✗ Incorrect passcode — try again
       </div>
       <button class="btn btn-primary" style="width:100%;padding:12px" onclick="handleGateUnlock()">Unlock →</button>
+      <button type="button" onclick="resetLocalGate()" style="display:block;margin:14px auto 0;background:none;border:0;color:var(--text2);text-decoration:underline;font-size:12px;cursor:pointer">Passcode not working on this device?</button>
     </div>
   </div>
 </div>
@@ -1626,7 +1615,8 @@ function hideGate() {
 async function handleGateUnlock() {
   const p = document.getElementById('gate-pass-input').value;
   if (!p) { alert('Enter your team passcode.'); return; }
-  const ok = await unlockApp(p);
+  let ok = false;
+  try { ok = await unlockApp(p); } catch(err) { alert('Passcode verification could not run: ' + err.message); return; }
   if (!ok) {
     document.getElementById('gate-error').style.display = 'block';
     document.getElementById('gate-pass-input').value = '';
@@ -1636,6 +1626,22 @@ async function handleGateUnlock() {
   hideGate();
   updateApiKeyCardVisibility();
   loadRepData();
+}
+
+function resetLocalGate() {
+  const message = 'This resets ONLY the passcode and encrypted Google Vision API key stored in THIS browser. It does not delete saved trips or receipts. You must enter your API key again. Continue?';
+  if (!confirm(message)) return;
+  try {
+    localStorage.removeItem(PASSCODE_HASH_KEY);
+    localStorage.removeItem(PASSCODE_SET_KEY);
+    localStorage.removeItem(ENCRYPTED_GCV_KEY);
+    sessionStorage.removeItem(SESSION_UNLOCKED);
+    isUnlocked = false;
+    gcvApiKey = '';
+    appPasscode = '';
+    document.getElementById('gate-error').style.display = 'none';
+    showGate('setup');
+  } catch (err) { alert('Unable to reset this browser’s passcode: ' + err.message); }
 }
 
 async function handleGateSetup() {
@@ -2388,8 +2394,7 @@ async function handleCCStatement(input) {
     msgEl.textContent = 'Parsing transactions…';
     progressEl.style.width = '70%';
 
-    const lines = parseCCSpatial(data.responses?.[0]?.fullTextAnnotation);
-    if (!lines.length) throw new Error('Could not identify complete date / merchant / USD rows. Please upload a higher-resolution screenshot; no amounts were applied.');
+    const lines = parseCCStatement(fullText);
     msgEl.textContent = `Matching ${lines.length} transactions to receipts…`;
     progressEl.style.width = '90%';
 
@@ -2399,9 +2404,15 @@ async function handleCCStatement(input) {
 
     // ALL parsed lines go into unmatched for manual assignment too
     ccAllLines = lines;
-    // Safety: OCR-derived transactions always require explicit approval before changing receipts.
-    // Confidence is useful for ranking, but cannot prove that OCR attached the correct amount.
-    ccMatches.forEach(m=>{m.auto=false;m.confirmed=false;m.reason='Review statement row and receipt amount before applying';});
+    // Apply only unambiguous >=90% matches immediately; review other matches first.
+    let autoApplied=0;
+    for (const m of ccMatches) if(m.auto) {
+      m.receipt.usdAmt=m.ccLine.amount;
+      m.receipt.usdPending=false;
+      m.receipt.ccReconciliation={vendor:m.ccLine.vendor,date:m.ccLine.date,usd:m.ccLine.amount,score:m.score};
+      autoApplied++;
+    }
+    if(autoApplied){persist();renderList();}
     renderCCMatches();
     progressEl.style.width = '100%';
     msgEl.textContent = `Parsed ${lines.length} transaction${lines.length!==1?'s':''} · ${matches.length} auto-matched, ${unmatched.length} need assignment.`;
@@ -2413,56 +2424,6 @@ async function handleCCStatement(input) {
     msgEl.textContent = `✗ Error: ${e.message}`;
     console.error('CC import error', e);
   }
-}
-
-// Spatial statement reader: prevents two-column OCR text from shifting USD values between rows.
-function parseCCSpatial(annotation) {
-  const pages=annotation?.pages||[];
-  const output=[];
-  for(const page of pages){
-    const W=page.width||1;
-    const words=[];
-    for(const block of page.blocks||[]) for(const para of block.paragraphs||[]) for(const word of para.words||[]){
-      const txt=(word.symbols||[]).map(s=>s.text||'').join('');
-      const v=word.boundingBox?.vertices||[];
-      if(!txt||!v.length)continue;
-      const xs=v.map(a=>a.x||0),ys=v.map(a=>a.y||0);
-      words.push({txt,x:Math.min(...xs),y:(Math.min(...ys)+Math.max(...ys))/2,h:Math.max(...ys)-Math.min(...ys)});
-    }
-    if(!words.length)continue;
-    // Each visual column is processed independently. Never stitch across a column boundary.
-    const columns=W>500?[words.filter(w=>w.x<W*.50),words.filter(w=>w.x>=W*.50)]:[words];
-    for(const col of columns){
-      col.sort((a,b)=>a.y-b.y||a.x-b.x);
-      const rows=[];
-      for(const w of col){
-        const tolerance=Math.max(5,Math.min(13,w.h*.55));
-        let row=rows.find(r=>Math.abs(r.y-w.y)<=tolerance);
-        if(!row){row={y:w.y,words:[]};rows.push(row);}
-        row.words.push(w);
-      }
-      rows.sort((a,b)=>a.y-b.y);
-      for(const row of rows){
-        row.words.sort((a,b)=>a.x-b.x);
-        const line=row.words.map(w=>w.txt).join(' ').replace(/\s+([.,])/g,'$1');
-        const dates=line.match(/\b(?:20\d{2}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]20\d{2})\b/g)||[];
-        const amounts=[...line.matchAll(/(?:\$\s*)?(\d{1,3}(?:,\d{3})*\.\d{2})(?!\d)/g)];
-        if(dates.length!==1||amounts.length!==1)continue;
-        const amount=Number(amounts[0][1].replace(/,/g,''));
-        if(!(amount>=.05&&amount<=50000))continue;
-        const dateRaw=dates[0];
-        let date='';
-        const d=dateRaw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
-        const m=dateRaw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
-        if(d)date=`${d[1]}-${d[2].padStart(2,'0')}-${d[3].padStart(2,'0')}`;
-        else if(m)date=`${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
-        const vendor=line.replace(dateRaw,'').replace(amounts[0][0],'').replace(/^[\s•▸›-]+|[\s•▸›-]+$/g,'').trim();
-        if(!date||vendor.length<3)continue;
-        output.push({date,vendor,amount,raw:line,spatial:true});
-      }
-    }
-  }
-  return output;
 }
 
 // Parse raw OCR text from a CC statement screenshot into transaction lines
@@ -2658,7 +2619,7 @@ function renderCCMatches() {
     <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:10px 12px;border:1.5px solid var(--border);font-size:12px" id="cc-match-${idx}">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
         <input type="checkbox" id="cc-chk-${idx}" ${m.confirmed?'checked':''} onchange="ccMatches[${idx}].confirmed=this.checked" style="width:14px;height:14px;cursor:pointer">
-        <span style="font-weight:600;color:${confColor};font-size:11px">${conf}% · ${'review required'}</span>
+        <span style="font-weight:600;color:${confColor};font-size:11px">${conf}% · ${m.auto ? 'auto-applied' : 'review required'}</span>
         <span style="flex:1"></span>
         <span style="font-weight:700;color:var(--green)">$${m.ccLine.amount.toFixed(2)} USD</span>
       </div>
@@ -4564,44 +4525,8 @@ if (new URLSearchParams(location.search).get('capture') === '1') {
   }, 600);
 }
 
-// ── PWA INSTALL PROMPT ────────────────────────────────────────────
-let pwaInstallEvent = null;
-
-window.addEventListener('beforeinstallprompt', (e) => {
-  e.preventDefault();
-  pwaInstallEvent = e;
-  // Show banner if not already dismissed
-  try {
-    if (!localStorage.getItem('pwa_dismissed')) {
-      document.getElementById('pwa-banner').hidden = false;
-    }
-  } catch(err) {}
-});
-
-window.addEventListener('appinstalled', () => {
-  document.getElementById('pwa-banner').hidden = true;
-  pwaInstallEvent = null;
-});
-
-async function installPWA() {
-  if (!pwaInstallEvent) return;
-  pwaInstallEvent.prompt();
-  const { outcome } = await pwaInstallEvent.userChoice;
-  if (outcome === 'accepted') {
-    document.getElementById('pwa-banner').hidden = true;
-  }
-  pwaInstallEvent = null;
-}
-
-function dismissPWA() {
-  document.getElementById('pwa-banner').hidden = true;
-  try { localStorage.setItem('pwa_dismissed', '1'); } catch(e) {}
-}
-
-// ── SERVICE WORKER (offline support) ─────────────────────────────
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
-}
+// Remove previously registered offline workers that can serve outdated builds.
+if ('serviceWorker' in navigator) { navigator.serviceWorker.getRegistrations().then(rs => rs.forEach(r => r.unregister())).catch(() => {}); }
 
 // Close modal on overlay click
 document.getElementById('edit-modal').addEventListener('click', function(e) {
@@ -4621,3 +4546,5 @@ document.getElementById('gate-new-pass2').addEventListener('keydown', e => {
 </script>
 </body>
 </html>
+
+</body></html>
